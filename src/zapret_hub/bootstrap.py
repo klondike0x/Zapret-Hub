@@ -289,16 +289,38 @@ def _ensure_windows_apps_registration(install_root: Path) -> None:
 
 
 def _resolve_work_root(install_root: Path) -> Path:
-    """Return a writable per-user state directory for installed builds."""
+    """Return the data directory, keeping portable data beside the executable."""
     explicit = str(os.environ.get("ZAPRET_HUB_WORK_ROOT", "") or "").strip()
     if explicit:
         return Path(explicit).expanduser().resolve()
-    if (install_root / "portable.flag").exists():
-        return install_root / "user_data"
-    if not is_packaged_runtime():
-        return install_root
+
     local_app_data = os.environ.get("LOCALAPPDATA")
     base = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
+    if (install_root / "portable.flag").exists():
+        target = install_root / "user_data"
+        # A portable build may be an upgrade of a previous build that stored its
+        # state in LocalAppData. Copy it once instead of starting with empty data;
+        # keep the source intact so rollback and recovery remain possible.
+        try:
+            target_has_entries = target.exists() and any(target.iterdir())
+        except OSError:
+            target_has_entries = True
+        if not target_has_entries:
+            for legacy_name in ("Zapret_Hub", "Zapret Hub", "ZapretHub"):
+                legacy = base / legacy_name
+                try:
+                    same_path = legacy.resolve() == target.resolve()
+                    if same_path or not legacy.is_dir() or not any(legacy.iterdir()):
+                        continue
+                    target.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(legacy, target, dirs_exist_ok=True)
+                    break
+                except (OSError, shutil.Error):
+                    continue
+        return target
+
+    if not is_packaged_runtime():
+        return install_root
     target = base / "Zapret_Hub"
     # Prefer a single folder name; migrate older LocalAppData locations once.
     if not target.exists():

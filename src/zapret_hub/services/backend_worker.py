@@ -4,6 +4,7 @@ import multiprocessing as mp
 import os
 import queue
 import tempfile
+import time
 import traceback
 import uuid
 from dataclasses import asdict
@@ -385,11 +386,27 @@ def _worker_main(task_queue, result_queue) -> None:
             continue
         action = str(task.get("action", ""))
         if action == "shutdown":
+            shutdown_ok = False
+            shutdown_payload: dict[str, Any] = {}
             try:
                 context.processes.stop_all()
-            except Exception:
-                pass
-            result_queue.put({"id": task.get("id", ""), "action": action, "ok": True, "payload": {}})
+                shutdown_payload = context.processes.last_shutdown_result
+                shutdown_ok = bool(shutdown_payload.get("ok", False))
+            except Exception as error:
+                shutdown_payload = {"ok": False, "reason": str(error)}
+                try:
+                    context.logging.log("error", "Backend shutdown failed", error=str(error))
+                except Exception:
+                    pass
+            result_queue.put(
+                {
+                    "id": task.get("id", ""),
+                    "action": action,
+                    "ok": shutdown_ok,
+                    "error": "" if shutdown_ok else str(shutdown_payload.get("reason", "shutdown failed")),
+                    "payload": {"shutdown": shutdown_payload},
+                }
+            )
             break
         task_id = str(task.get("id", ""))
         payload = task.get("payload", {}) or {}
@@ -1216,6 +1233,7 @@ class BackendWorkerClient(QObject):
         self._process.start()
         self._cancel_paths: dict[str, str] = {}
         self._pending_tasks: set[str] = set()
+        self._last_stop_error = ""
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(80)
         self._poll_timer.timeout.connect(self._poll_results)
@@ -1282,17 +1300,42 @@ class BackendWorkerClient(QObject):
         if not self._pending_tasks and self._poll_timer.isActive():
             self._poll_timer.stop()
 
-    def stop(self) -> None:
+    def stop(self, *, timeout: float = 15.0) -> bool:
+        shutdown_id = uuid.uuid4().hex
         try:
-            self._task_queue.put({"id": uuid.uuid4().hex, "action": "shutdown", "payload": {}})
+            self._task_queue.put({"id": shutdown_id, "action": "shutdown", "payload": {}})
         except Exception:
-            pass
+            return False
         self._poll_timer.stop()
         if self._process.is_alive():
-            self._process.join(timeout=3)
+            self._process.join(timeout=max(1.0, float(timeout)))
+        result_ok = False
+        result_seen = False
+        self._last_stop_error = ""
+        deadline = time.monotonic() + 1.0
+        while not result_seen and time.monotonic() < deadline:
+            try:
+                message = self._result_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            except Exception:
+                result_ok = False
+                break
+            if str(message.get("id", "")) == shutdown_id:
+                result_seen = True
+                result_ok = bool(message.get("ok"))
+                self._last_stop_error = str(message.get("error", "") or "")
         if self._process.is_alive():
+            result_ok = False
+            if not self._last_stop_error:
+                self._last_stop_error = "backend worker did not stop before timeout"
             self._process.terminate()
-            self._process.join(timeout=2)
+            self._process.join(timeout=3)
+        return bool(result_seen and result_ok and not self._process.is_alive())
+
+    @property
+    def last_stop_error(self) -> str:
+        return str(self._last_stop_error or "")
 
     def request_shutdown_background(self) -> None:
         try:

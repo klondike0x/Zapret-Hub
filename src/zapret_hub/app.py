@@ -4,7 +4,6 @@ import hashlib
 import multiprocessing
 import os
 import sys
-import threading
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -386,11 +385,14 @@ def run(argv: list[str] | None = None) -> int:
                     return
                 try:
                     if context.backend is not None:
-                        context.backend.request_shutdown_background()
+                        context.backend.stop(timeout=15.0)
                     else:
-                        threading.Thread(target=context.processes.stop_all, daemon=True).start()
-                except Exception:
-                    pass
+                        context.processes.stop_all()
+                except Exception as error:
+                    try:
+                        context.logging.log("error", "Application aboutToQuit cleanup failed", error=str(error))
+                    except Exception:
+                        pass
 
             app.aboutToQuit.connect(_cleanup_before_quit)
             if known.autostart_launch and settings.auto_run_components:

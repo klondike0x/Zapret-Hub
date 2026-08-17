@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import ctypes
 import locale
+import json
 import os
 import shutil
 import subprocess
@@ -32,7 +33,31 @@ def _is_ru() -> bool:
 
 RU = _is_ru()
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\ZapretHub"
-INSTALLER_VERSION = "3.0.2"
+
+
+def _load_installer_version() -> str:
+    roots: list[Path] = []
+    try:
+        roots.append(Path(__file__).resolve().parents[1])
+    except Exception:
+        pass
+    try:
+        roots.append(Path(sys.executable).resolve().parent)
+    except Exception:
+        pass
+    for root in roots:
+        manifest = root / "installer_version.json"
+        try:
+            payload = json.loads(manifest.read_text(encoding="utf-8-sig"))
+            version = str(payload.get("version") or "").strip()
+            if version:
+                return version
+        except Exception:
+            continue
+    return "3.0.3"
+
+
+INSTALLER_VERSION = _load_installer_version()
 INSTALLER_LOG_PATH = Path(tempfile.gettempdir()) / "zapret_hub_installer.log"
 UNINSTALLER_LOG_PATH = Path(tempfile.gettempdir()) / "zapret_hub_uninstaller.log"
 

@@ -2,7 +2,7 @@ param(
     [string]$Python = ".\.venv\Scripts\python.exe",
     [string]$OutputDir = "dist_nuitka",
     [string]$UninstallerSource = "",
-    [string]$Version = "3.0.2",
+    [string]$Version = "3.0.3",
     [ValidateSet("zig", "msvc", "mingw")]
     [string]$Compiler = "msvc"
 )
@@ -144,15 +144,19 @@ Copy-Item $runtimeStage $runtimeTarget -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $root "docs\legal\ZAPRET_HUB_TERMS_RU.txt") `
   -Destination (Join-Path $distDir.FullName "ZAPRET_HUB_TERMS_RU.txt") -Force
 
+# Mark the app as portable so all runtime data stays beside the executable.
+New-Item -ItemType File -Path (Join-Path $distDir.FullName "portable.flag") -Force | Out-Null
+
 $uninstallerCandidates = @()
 if ($UninstallerSource) {
     $uninstallerCandidates += $UninstallerSource
 }
 $uninstallerCandidates += @(
     (Join-Path $root "bundled_uninstaller\uninstall_zaprethub.exe"),
-    (Join-Path $root "dist_installer_3.0.2\uninstall_zaprethub.exe"),
+    (Join-Path $root "dist_installer_3.0.3\uninstall_zaprethub.exe"),
     (Join-Path $root "dist_installer\uninstall_zaprethub.exe")
 )
+$uninstallerCandidates += @(Get-ChildItem -LiteralPath $root -Directory -Filter "dist_installer*" -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.FullName "uninstall_zaprethub.exe" })
 $uninstallerCopied = $false
 foreach ($candidate in $uninstallerCandidates) {
     if ($candidate -and (Test-Path -LiteralPath $candidate)) {

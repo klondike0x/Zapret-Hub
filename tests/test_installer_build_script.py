@@ -27,3 +27,24 @@ def test_installer_build_uses_onefile_without_inno_wrapper() -> None:
     assert "--onefile-cache-mode=cached" in script
     assert "Find-ISCC" not in script
     assert "zapret_hub_installer.iss" not in script
+
+
+def test_portable_build_writes_portable_flag() -> None:
+    script = (ROOT / "scripts" / "build_nuitka.ps1").read_text(encoding="utf-8")
+
+    assert 'portable.flag' in script
+    assert 'New-Item -ItemType File' in script
+
+
+def test_component_updates_button_uses_theme_aware_text_color() -> None:
+    modal = (ROOT / "web_ui" / "src" / "components" / "shell" / "ComponentUpdatesModal.tsx").read_text(encoding="utf-8")
+
+    assert 'Обновить всё' in modal
+    assert 'font-semibold text-fg' in modal
+    assert 'font-medium text-white' not in modal
+def test_installed_mods_actions_use_theme_aware_button_colors() -> None:
+    page = (ROOT / "web_ui" / "src" / "pages" / "InstalledModsPage.tsx").read_text(encoding="utf-8")
+
+    assert page.count("bg-accent") >= 2
+    assert page.count("text-accent-foreground") >= 2
+    assert "bg-[rgb(var(--page-accent-rgb))]" not in page

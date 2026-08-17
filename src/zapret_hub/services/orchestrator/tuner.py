@@ -101,6 +101,7 @@ class SmartTuner:
         domains: list[str] | None = None,
         ips: list[str] | None = None,
         domains_missing: list[str] | None = None,
+        allow_strategy_after_list: bool = False,
     ) -> list[TunerStep]:
         current = current or {}
         selected = selected_services or set()
@@ -426,6 +427,7 @@ class SmartTuner:
             and proto != "udp"
             and not (service_set & _GAMING_SERVICES)
             and "fortnite" not in service_set
+            and not allow_strategy_after_list
         )
         if soft_list_miss:
             allow_strategy = False

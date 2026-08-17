@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zapret-hub"
-version = "3.0.2"
+version = "3.0.3"
 description = "Windows desktop hub for DPI bypass management based on bol-van/zapret2."
 readme = "README.md"
 requires-python = ">=3.11"

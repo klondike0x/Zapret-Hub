@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "sites": [
+    {
+      "id": "rutracker",
+      "name": "Rutracker",
+      "domains": [
+        "rutracker.org",
+        "rutracker.net"
+      ]
+    }
+  ]
+}

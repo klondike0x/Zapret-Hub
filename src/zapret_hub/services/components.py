@@ -227,6 +227,11 @@ class ProcessManager:
         self._github_recovery_profile: dict[str, str] | None = None
         self._component_releases_mem: dict[str, tuple[float, list[dict[str, str]]]] = {}
         self._zapret_runtime_lock = threading.RLock()
+        # WinDivert is shared. Keep explicit ownership so third-party services
+        # are never stopped merely because they use the same service name.
+        self._windivert_service_state_before_start: dict[str, str] = {}
+        self._windivert_services_started_by_hub: set[str] = set()
+        self._last_shutdown_result: dict[str, Any] = {"ok": True, "reason": "not-run"}
         self._job = _WindowsJob() if sys.platform.startswith("win") else None
         self.github = GitHubNetworkClient(logging, recovery_runner=self.with_github_connectivity_recovery)
         # Optional UI hook: (component_id, status, last_error) after optimistic starts fail.
@@ -625,7 +630,10 @@ class ProcessManager:
             if process and process.pid:
                 self._run_quiet(["taskkill", "/PID", str(process.pid), "/F", "/T"])
             self._processes.pop(component_id, None)
+            if process is not None:
+                self._remember_hub_started_windivert_services()
             self._kill_image("winws2.exe")
+            self._stop_hub_started_windivert_services(reason="Zapret2 stopped")
             self._close_source_log_stream(component_id)
             state.status = "stopped" if not self._is_image_running("winws2.exe") else "running"
             state.pid = None
@@ -730,9 +738,27 @@ class ProcessManager:
         return started
 
     def stop_all(self) -> list[ComponentState]:
+        if any(
+            self._processes.get(component_id) is not None
+            and self._processes[component_id].poll() is None
+            for component_id in ("zapret", "zapret2")
+        ):
+            self._remember_hub_started_windivert_services()
         stopped = [self.stop_component(component.id) for component in self.list_components()]
+        driver_ok, driver_reason = self._stop_hub_started_windivert_services(reason="application shutdown")
+        component_ok = all(str(getattr(state, "status", "")) == "stopped" for state in stopped)
+        self._last_shutdown_result = {
+            "ok": bool(component_ok and driver_ok),
+            "reason": str(driver_reason or ("components did not stop" if not component_ok else "")),
+        }
+        if not self._last_shutdown_result["ok"]:
+            self.logging.log("error", "Application shutdown cleanup incomplete", reason=self._last_shutdown_result["reason"])
         self._cleanup_merged_runtime()
         return stopped
+
+    @property
+    def last_shutdown_result(self) -> dict[str, Any]:
+        return dict(getattr(self, "_last_shutdown_result", {"ok": False, "reason": "shutdown result unavailable"}))
 
     def toggle_component_enabled(self, component_id: str) -> ComponentDefinition:
         components = self.list_components()
@@ -1222,6 +1248,7 @@ foreach ($adapter in @($payload.adapters)) {
         if not self._diagnostic_runtime_override:
             # Explicit user start — don't stay blocked by a stale diagnostic abort.
             self._diagnostic_abort.clear()
+        self._remember_windivert_service_state_before_start()
         # Never rewrite Quick Access mode here — Auto/start must not flip Zapret↔Zapret2.
         # Always clear existing winws copies, then start a Hub-owned instance.
         # When already running, prefer seamless cutover (stage B → start new → kill old).
@@ -1310,6 +1337,7 @@ foreach ($adapter in @($payload.adapters)) {
             if self._job:
                 self._job.assign_pid(process.pid)
             self._processes[component_id] = process
+            self._remember_hub_started_windivert_services()
             # Optimistic: process spawned → report running immediately; confirm in background.
             if process.poll() is not None:
                 log_hint = self._recent_source_log_error("zapret")
@@ -1371,6 +1399,7 @@ foreach ($adapter in @($payload.adapters)) {
         return state
 
     def _start_zapret2(self, component_id: str) -> ComponentState:
+        self._remember_windivert_service_state_before_start()
         if self._is_image_running("winws2.exe"):
             self.logging.log("info", "Stopping existing winws2 copies before zapret2 start")
         self.stop_component(component_id)
@@ -1411,6 +1440,7 @@ foreach ($adapter in @($payload.adapters)) {
             if self._job:
                 self._job.assign_pid(process.pid)
             self._processes[component_id] = process
+            self._remember_hub_started_windivert_services()
             if process.poll() is not None:
                 log_hint = self._recent_source_log_error(component_id)
                 self._close_source_log_stream(component_id)
@@ -5085,6 +5115,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                     except Exception:
                         pass
                 # Watch long enough for winws/winws2 to parse args and die on bad
+                self._remember_hub_started_windivert_services()
                 # --blob / missing bins. Success only if Popen stays alive the whole window.
                 for _ in range(24):  # ~3.6s
                     owned = self._processes.get(component_id)
@@ -5158,6 +5189,148 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             time.sleep(max(0.02, float(delay)))
         return not self._is_image_running(image_name)
 
+    def _remember_windivert_service_state_before_start(self) -> None:
+        if not sys.platform.startswith("win"):
+            return
+        states = getattr(self, "_windivert_service_state_before_start", {})
+        for service_name in ("WinDivert", "WinDivert14"):
+            states[service_name] = self._service_status(service_name)
+        self._windivert_service_state_before_start = states
+
+    def _is_hub_service_path(self, image_path: str) -> bool:
+        raw = self._normalize_driver_image_path(str(image_path or ""))
+        if not raw:
+            return False
+        roots = (
+            self.storage.paths.install_root,
+            self.storage.paths.merged_runtime_dir,
+            Path(tempfile.gettempdir()) / "zapret_hub_runtime_cleanup",
+        )
+        return any(self._path_mentions_runtime(raw, root) for root in roots)
+
+    def _remember_hub_started_windivert_services(self) -> None:
+        if not sys.platform.startswith("win"):
+            return
+        before = getattr(self, "_windivert_service_state_before_start", {})
+        owned = getattr(self, "_windivert_services_started_by_hub", set())
+        for service_name in ("WinDivert", "WinDivert14"):
+            status = self._service_status(service_name)
+            image_path = self._service_image_path(service_name)
+            if status != "RUNNING" or not self._is_hub_service_path(image_path):
+                continue
+            if service_name not in before:
+                continue
+            previous = str(before[service_name])
+            if service_name in owned or previous in {"ABSENT", "STOPPED"}:
+                owned.add(service_name)
+                self.logging.log(
+                    "info",
+                    "WinDivert service ownership recorded",
+                    service=service_name,
+                    hub_started=True,
+                    previous_status=previous,
+                    image_path=image_path,
+                )
+        self._windivert_services_started_by_hub = owned
+
+    def _service_status(self, service_name: str) -> str:
+        proc = self._run_quiet(["sc", "query", service_name])
+        if proc.returncode != 0:
+            return "ABSENT"
+        for line in (proc.stdout or "").splitlines():
+            if "STATE" not in line.upper():
+                continue
+            match = re.search(r":\s*\d+\s+([A-Z_]+)", line.upper())
+            if match:
+                return match.group(1)
+        return "UNKNOWN"
+
+    def _stop_hub_started_windivert_services(self, *, reason: str) -> tuple[bool, str]:
+        if not sys.platform.startswith("win"):
+            return True, ""
+        owned = set(getattr(self, "_windivert_services_started_by_hub", set()))
+        if not owned:
+            for service_name in ("WinDivert", "WinDivert14"):
+                self.logging.log(
+                    "info",
+                    "WinDivert service ownership",
+                    service=service_name,
+                    hub_started=False,
+                    status=self._service_status(service_name),
+                    image_path=self._service_image_path(service_name),
+                    reason=reason,
+                )
+            self.logging.log(
+                "info",
+                "WinDivert cleanup skipped",
+                hub_started=False,
+                reason="no WinDivert service was started by Zapret Hub",
+            )
+            return True, ""
+
+        failures: list[str] = []
+        for service_name in ("WinDivert", "WinDivert14"):
+            status = self._service_status(service_name)
+            image_path = self._service_image_path(service_name)
+            hub_started = service_name in owned
+            self.logging.log(
+                "info",
+                "WinDivert service ownership",
+                service=service_name,
+                hub_started=hub_started,
+                status=status,
+                image_path=image_path,
+                reason=reason,
+            )
+            if not hub_started:
+                continue
+            if image_path and not self._is_hub_service_path(image_path):
+                self.logging.log(
+                    "warning",
+                    "WinDivert stop skipped because ImagePath is no longer Hub-owned",
+                    service=service_name,
+                    hub_started=True,
+                    image_path=image_path,
+                )
+                continue
+            if status in {"ABSENT", "STOPPED"}:
+                self.logging.log(
+                    "info",
+                    "WinDivert service already stopped",
+                    service=service_name,
+                    final_status=status,
+                )
+                continue
+
+            stop_proc = self._run_quiet(["sc", "stop", service_name])
+            self.logging.log(
+                "info",
+                "WinDivert service stop attempted",
+                service=service_name,
+                hub_started=True,
+                returncode=stop_proc.returncode,
+                error=(stop_proc.stderr or "").strip(),
+            )
+            final_status = "UNKNOWN"
+            for _ in range(50):
+                final_status = self._service_status(service_name)
+                if final_status in {"STOPPED", "ABSENT"}:
+                    break
+                time.sleep(0.1)
+            self.logging.log(
+                "info" if final_status in {"STOPPED", "ABSENT"} else "error",
+                "WinDivert service stop result",
+                service=service_name,
+                hub_started=True,
+                final_status=final_status,
+                reason="" if final_status in {"STOPPED", "ABSENT"} else "service did not reach STOPPED",
+            )
+            if final_status not in {"STOPPED", "ABSENT"}:
+                failures.append(f"{service_name}: {final_status}")
+
+        if failures:
+            return False, "WinDivert service did not reach STOPPED (" + ", ".join(failures) + ")"
+        return True, ""
     def _force_stop_zapret_runtime(self) -> None:
         process = self._processes.get("zapret")
         if process and process.poll() is None:
@@ -5176,12 +5349,9 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                 self._kill_image("winws.exe")
                 if self._wait_for_image_exit("winws.exe", attempts=2, delay=0.12):
                     break
-        for _ in range(3):
-            self._cleanup_zapret_driver_services(self._current_zapret_runtime)
-            self._cleanup_orphaned_zapret_driver_services()
-            if not any(self._service_exists(name) for name in _ZAPRET_DRIVER_SERVICE_NAMES):
-                break
-            time.sleep(0.2)
+        if process is not None:
+            self._remember_hub_started_windivert_services()
+        self._stop_hub_started_windivert_services(reason="winws stopped")
         self._processes.pop("zapret", None)
         self._current_zapret_runtime = None
 
@@ -5203,6 +5373,15 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             if not lingering and not self._is_image_running("winws.exe"):
                 return True
             for service_name, image_path in lingering:
+                if service_name not in getattr(self, "_windivert_services_started_by_hub", set()):
+                    self.logging.log(
+                        "warning",
+                        "Skipping stale WinDivert service not started by Hub",
+                        service=service_name,
+                        hub_started=False,
+                        image_path=image_path,
+                    )
+                    continue
                 self._delete_zapret_service(service_name, image_path=image_path)
             time.sleep(0.15)
         return not self._managed_zapret_driver_services() and not self._is_image_running("winws.exe")
@@ -5212,8 +5391,11 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         for service_name in _ZAPRET_DRIVER_SERVICE_NAMES:
             if not self._service_exists(service_name):
                 continue
+            status = self._service_status(service_name)
             image_path = self._service_image_path(service_name)
-            if image_path and self._is_managed_or_stale_zapret_service_path(image_path):
+            if status in {"STOPPED", "ABSENT"}:
+                continue
+            if image_path and self._is_hub_service_path(image_path):
                 managed.append((service_name, image_path))
         return managed
 
@@ -5367,19 +5549,33 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         for service_name in _ZAPRET_DRIVER_SERVICE_NAMES:
             if not self._service_exists(service_name):
                 continue
+            if service_name not in getattr(self, "_windivert_services_started_by_hub", set()):
+                self.logging.log(
+                    "info",
+                    "Skipping driver service cleanup because Hub did not start it",
+                    service=service_name,
+                    hub_started=False,
+                )
+                continue
             image_path = self._service_image_path(service_name)
-            if service_name.lower() != "zapret":
-                if not image_path:
-                    continue
-                if runtime_root is not None and not self._path_mentions_runtime(image_path, runtime_root):
-                    continue
-                if runtime_root is None and not self._is_managed_or_stale_zapret_service_path(image_path):
-                    continue
+            if not self._is_hub_service_path(image_path):
+                self.logging.log(
+                    "info",
+                    "Skipping non-Hub driver service cleanup",
+                    service=service_name,
+                    hub_started=False,
+                    image_path=image_path,
+                )
+                continue
+            if runtime_root is not None and not self._path_mentions_runtime(image_path, runtime_root):
+                continue
             self._delete_zapret_service(service_name, image_path=image_path)
 
     def _driver_service_references_runtime(self, runtime_root: Path) -> bool:
         for service_name in _ZAPRET_DRIVER_SERVICE_NAMES:
             if not self._service_exists(service_name):
+                continue
+            if self._service_status(service_name) in {"STOPPED", "ABSENT"}:
                 continue
             image_path = self._service_image_path(service_name)
             if image_path and self._path_mentions_runtime(image_path, runtime_root):
@@ -5518,7 +5714,7 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
             image_path = self._service_image_path(service_name)
             if not image_path:
                 continue
-            if not self._is_managed_or_stale_zapret_service_path(image_path):
+            if not self._is_hub_service_path(image_path):
                 continue
             self._delete_zapret_service(service_name, image_path=image_path)
 
