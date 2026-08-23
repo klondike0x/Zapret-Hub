@@ -123,6 +123,10 @@ def _package_portable(
         shutil.rmtree(portable_dir, ignore_errors=True)
     shutil.copytree(source, portable_dir, dirs_exist_ok=True)
     _copy_uninstaller(uninstaller, portable_dir)
+    # Mark only the portable build as portable. The shared *.dist (and therefore
+    # the installer payload) must stay clean so installed copies keep their data
+    # in LocalAppData instead of the install directory.
+    (portable_dir / "portable.flag").write_text("", encoding="utf-8")
     runtime_dir = portable_dir / "runtime"
     if runtime_dir.is_dir():
         prune = _load_prune()

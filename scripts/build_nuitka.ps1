@@ -129,6 +129,12 @@ if (-not $distDir) {
     throw "Nuitka output directory (*.dist) not found in $OutputDir"
 }
 
+# Remove any stray portable marker so this shared *.dist can feed both the
+# installable build and the portable packaging step. The marker is added later
+# only by prepare_nuitka_release._package_portable(): an installed app (e.g.
+# under Program Files) must keep its data in LocalAppData, not beside the exe.
+Remove-Item -LiteralPath (Join-Path $distDir.FullName "portable.flag") -Force -ErrorAction SilentlyContinue
+
 # Keep only production WebEngine resources and the locales the application
 # actually exposes. This runs after Nuitka, so it also covers bundled Qt files.
 & $PythonExe scripts\prune_qt_runtime.py $distDir.FullName
@@ -143,9 +149,6 @@ Copy-Item $runtimeStage $runtimeTarget -Recurse -Force
 # Keep the agreement visible at the root of every portable package as well.
 Copy-Item -LiteralPath (Join-Path $root "docs\legal\ZAPRET_HUB_TERMS_RU.txt") `
   -Destination (Join-Path $distDir.FullName "ZAPRET_HUB_TERMS_RU.txt") -Force
-
-# Mark the app as portable so all runtime data stays beside the executable.
-New-Item -ItemType File -Path (Join-Path $distDir.FullName "portable.flag") -Force | Out-Null
 
 $uninstallerCandidates = @()
 if ($UninstallerSource) {

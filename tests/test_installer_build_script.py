@@ -29,11 +29,21 @@ def test_installer_build_uses_onefile_without_inno_wrapper() -> None:
     assert "zapret_hub_installer.iss" not in script
 
 
-def test_portable_build_writes_portable_flag() -> None:
+def test_portable_flag_is_not_written_to_shared_dist() -> None:
     script = (ROOT / "scripts" / "build_nuitka.ps1").read_text(encoding="utf-8")
 
-    assert 'portable.flag' in script
-    assert 'New-Item -ItemType File' in script
+    # The shared *.dist feeds both the installer and portable packaging, so it
+    # must never carry the portable marker: an installed app has to keep its
+    # data in LocalAppData, not beside the executable.
+    assert 'New-Item -ItemType File -Path (Join-Path $distDir.FullName "portable.flag")' not in script
+
+
+def test_portable_packaging_writes_portable_flag() -> None:
+    release_script = (ROOT / "scripts" / "prepare_nuitka_release.py").read_text(encoding="utf-8")
+    build_script = (ROOT / "scripts" / "build_nuitka.ps1").read_text(encoding="utf-8")
+
+    assert '(portable_dir / "portable.flag").write_text("", encoding="utf-8")' in release_script
+    assert 'Remove-Item -LiteralPath (Join-Path $distDir.FullName "portable.flag")' in build_script
 
 
 def test_component_updates_button_uses_theme_aware_text_color() -> None:
