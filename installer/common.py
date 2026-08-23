@@ -415,10 +415,13 @@ def terminate_running_instances(install_dir: Path | None = None) -> None:
     if not str(target_root).strip():
         return
 
-    _remove_autostart_entries()
-    # Service name is shared by Zapret Hub installs; only touch it when we have a real target.
-    _run_hidden(["sc", "stop", "zapret"])
-    _run_hidden(["sc", "delete", "zapret"])
+    portable_target = (target_root / "portable.flag").is_file()
+    if not portable_target:
+        # These actions are machine/global state. A portable copy must not
+        # remove the normal installation's Run entry or shared Zapret service.
+        _remove_autostart_entries()
+        _run_hidden(["sc", "stop", "zapret"])
+        _run_hidden(["sc", "delete", "zapret"])
 
     root_literal = str(target_root).replace("'", "''")
     current_pid = os.getpid()

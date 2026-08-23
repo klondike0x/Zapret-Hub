@@ -198,3 +198,22 @@ def test_resolve_install_dir_prefers_portable_runtime(tmp_path: Path, monkeypatc
     monkeypatch.setattr(installer_common, "install_dir_from_registry", lambda: normal)
 
     assert installer_common.resolve_install_dir() == portable
+
+
+def test_portable_termination_skips_global_cleanup(tmp_path: Path, monkeypatch) -> None:
+    install_dir = tmp_path / "Portable Zapret Hub"
+    install_dir.mkdir()
+    (install_dir / "portable.flag").touch()
+    calls: list[object] = []
+
+    monkeypatch.setattr(installer_common.sys, "platform", "win32")
+    monkeypatch.setattr(installer_common, "_remove_autostart_entries", lambda: calls.append("autostart"))
+    monkeypatch.setattr(installer_common, "_run_hidden", lambda command: calls.append(("hidden", command)))
+    monkeypatch.setattr(installer_common, "_run_hidden_script", lambda script: calls.append(("script", script)))
+    monkeypatch.setattr(installer_common.time, "sleep", lambda _seconds: None)
+
+    installer_common.terminate_running_instances(install_dir)
+
+    assert "autostart" not in calls
+    assert not any(isinstance(item, tuple) and item[0] == "hidden" for item in calls)
+    assert any(isinstance(item, tuple) and item[0] == "script" for item in calls)
