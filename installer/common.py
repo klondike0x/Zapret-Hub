@@ -283,6 +283,11 @@ def looks_like_zapret_hub_dir(path: Path) -> bool:
     return any((path / name).exists() for name in ("zapret_hub.exe", "Zapret_Hub.exe", "uninstall_zaprethub.exe"))
 
 
+def _is_normal_install_location(path: Path) -> bool:
+    """Return whether a registry path belongs to a normal installed copy."""
+    return path.exists() and not (path / "portable.flag").is_file()
+
+
 def install_dir_from_registry() -> Path | None:
     if not sys.platform.startswith("win"):
         return None
@@ -294,7 +299,7 @@ def install_dir_from_registry() -> Path | None:
             with winreg.OpenKey(root, UNINSTALL_KEY, 0, access) as key:
                 value, _ = winreg.QueryValueEx(key, "InstallLocation")
                 path = Path(str(value))
-                if path.exists():
+                if _is_normal_install_location(path):
                     return path
         except Exception:
             continue

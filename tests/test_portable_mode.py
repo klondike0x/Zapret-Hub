@@ -85,17 +85,3 @@ def test_portable_mode_does_not_recopy_existing_user_data(tmp_path: Path, monkey
 
     assert bootstrap._resolve_work_root(install_root) == user_data
     assert (user_data / "marker.txt").read_text(encoding="utf-8") == "portable"
-
-
-def test_portable_registration_does_not_replace_existing_install(tmp_path: Path) -> None:
-    from zapret_hub import bootstrap
-
-    installed_root = tmp_path / "Installed Zapret Hub"
-    installed_root.mkdir()
-    portable_root = tmp_path / "Portable Zapret Hub"
-    portable_root.mkdir()
-    (portable_root / "portable.flag").touch()
-
-    assert bootstrap._portable_registration_can_replace(portable_root, str(installed_root)) is False
-    assert bootstrap._portable_registration_can_replace(portable_root, str(portable_root)) is True
-    assert bootstrap._portable_registration_can_replace(portable_root, str(tmp_path / "removed")) is True

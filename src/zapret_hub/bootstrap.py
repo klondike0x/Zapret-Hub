@@ -30,19 +30,6 @@ _PORTABLE_LEGACY_MARKER = "portable_legacy.flag"
 _PORTABLE_MIGRATION_ENV = "ZAPRET_HUB_MIGRATE_LEGACY_DATA"
 
 
-def _portable_registration_can_replace(install_root: Path, registered_location: str | None) -> bool:
-    """Allow a portable build to claim the shared Apps entry only when it is free/stale."""
-    location = str(registered_location or "").strip()
-    if not location:
-        return True
-    try:
-        registered = Path(location).expanduser().resolve()
-        current = install_root.expanduser().resolve()
-    except Exception:
-        return False
-    return registered == current or not registered.exists()
-
-
 @dataclass(slots=True)
 class ApplicationContext:
     paths: AppPaths
@@ -266,18 +253,10 @@ def _ensure_windows_apps_registration(install_root: Path) -> None:
     except ImportError:
         return
     uninstall_key = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\ZapretHub"
+    # Portable copies must not claim the shared installed-app registration.
+    # Otherwise a portable-first launch can be mistaken for the normal install.
     if (install_root / "portable.flag").is_file():
-        for root in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
-            try:
-                access = winreg.KEY_READ
-                if root == winreg.HKEY_LOCAL_MACHINE:
-                    access |= winreg.KEY_WOW64_64KEY
-                with winreg.OpenKey(root, uninstall_key, 0, access) as key:
-                    registered_location, _ = winreg.QueryValueEx(key, "InstallLocation")
-                if not _portable_registration_can_replace(install_root, str(registered_location)):
-                    return
-            except Exception:
-                continue
+        return
     uninstall_cmd = f'"{uninstaller}" --install-dir "{install_root}"'
     version_parts = str(__version__).split(".")
     try:

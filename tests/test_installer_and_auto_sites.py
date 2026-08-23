@@ -172,3 +172,13 @@ def test_tuner_allows_strategy_after_configured_site_list() -> None:
     )
     assert any(step.kind == "add_domain" for step in steps)
     assert any(step.kind == "general" for step in steps)
+
+def test_registry_discovery_ignores_portable_location(tmp_path: Path) -> None:
+    normal = tmp_path / "normal"
+    normal.mkdir()
+    portable = tmp_path / "portable"
+    portable.mkdir()
+    (portable / "portable.flag").touch()
+
+    assert installer_common._is_normal_install_location(normal)
+    assert not installer_common._is_normal_install_location(portable)

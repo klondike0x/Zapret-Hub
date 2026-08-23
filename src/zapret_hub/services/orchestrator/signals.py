@@ -190,14 +190,43 @@ class SignalCollector:
             )
 
     def probe_host_access(self, host: str, *, timeout_s: float = 4.0) -> ProbeResult:
-        """Production verdict: TLS handshake AND HTTPS GET must succeed."""
+        """Production verdict: TLS handshake AND HTTPS GET must succeed.
+
+        The timeout is a single wall-clock budget shared by both stages.
+        """
+        started = time.perf_counter()
         host = _host_from_target(host)
         if not host:
             return ProbeResult(ok=False, target=host, latency_ms=0.0, error="empty_host", cls="dns_fail")
-        tls = self.probe_tls(host, timeout_s=timeout_s)
+
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return ProbeResult(
+                ok=False,
+                target=host,
+                latency_ms=(time.perf_counter() - started) * 1000.0,
+                error="probe_timeout",
+                kind="tls+http",
+                cls="tcp_timeout",
+            )
+
+        tls = self.probe_tls(host, timeout_s=remaining)
         if not tls.ok:
             return tls
-        http = self.probe_https(f"https://{host}/", timeout_s=timeout_s)
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return ProbeResult(
+                ok=False,
+                target=host,
+                latency_ms=(time.perf_counter() - started) * 1000.0,
+                error="probe_timeout",
+                kind="tls+http",
+                cls="tcp_timeout",
+            )
+
+        http = self.probe_https(f"https://{host}/", timeout_s=remaining)
         if not http.ok:
             return http
         return ProbeResult(

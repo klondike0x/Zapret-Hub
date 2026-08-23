@@ -911,3 +911,34 @@ def test_probe_https_classifies_451_as_block_but_keeps_gateway_4xx_ok(monkeypatc
     gateway_response = collector.probe_https("https://example.org", timeout_s=0.1)
     assert gateway_response.ok is True
     assert gateway_response.cls == "ok"
+
+def test_probe_host_access_shares_one_deadline(monkeypatch):
+    from zapret_hub.services.orchestrator import signals as signals_module
+
+    collector = signals_module.SignalCollector()
+    now = 100.0
+    calls: list[tuple[str, float]] = []
+
+    def fake_monotonic() -> float:
+        return now
+
+    def fake_tls(host: str, *, timeout_s: float) -> ProbeResult:
+        nonlocal now
+        calls.append(("tls", timeout_s))
+        now += 1.25
+        return ProbeResult(ok=True, target=f"{host}:443", latency_ms=1.0, cls="ok")
+
+    def fake_http(url: str, *, timeout_s: float) -> ProbeResult:
+        calls.append(("http", timeout_s))
+        return ProbeResult(ok=True, target=url, latency_ms=1.0, cls="ok")
+
+    monkeypatch.setattr(signals_module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(collector, "probe_tls", fake_tls)
+    monkeypatch.setattr(collector, "probe_https", fake_http)
+
+    result = collector.probe_host_access("example.org", timeout_s=2.0)
+
+    assert result.ok is True
+    assert [kind for kind, _ in calls] == ["tls", "http"]
+    assert 1.99 <= calls[0][1] <= 2.01
+    assert 0.74 <= calls[1][1] <= 0.76
