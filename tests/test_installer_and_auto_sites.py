@@ -217,3 +217,26 @@ def test_portable_termination_skips_global_cleanup(tmp_path: Path, monkeypatch) 
     assert "autostart" not in calls
     assert not any(isinstance(item, tuple) and item[0] == "hidden" for item in calls)
     assert any(isinstance(item, tuple) and item[0] == "script" for item in calls)
+
+
+def test_wipe_install_dir_propagates_portable_status(tmp_path: Path, monkeypatch) -> None:
+    install_dir = tmp_path / "Portable Zapret Hub"
+    install_dir.mkdir()
+    (install_dir / "portable.flag").touch()
+    terminate_calls: list[object] = []
+    remove_calls: list[object] = []
+
+    def fake_terminate(path, *, portable_install=None):
+        terminate_calls.append((path, portable_install))
+
+    def fake_remove(path, root, *, portable_install=None):
+        remove_calls.append((path, root, portable_install))
+        path.unlink()
+
+    monkeypatch.setattr(installer_common, "terminate_running_instances", fake_terminate)
+    monkeypatch.setattr(installer_common, "safe_remove_item", fake_remove)
+
+    installer_common.wipe_install_dir(install_dir)
+
+    assert terminate_calls == [(install_dir, True)]
+    assert remove_calls == [(install_dir / "portable.flag", install_dir, True)]

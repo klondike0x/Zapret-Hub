@@ -398,7 +398,7 @@ def _process_path_under_root(executable_path: str, root: Path) -> bool:
             return False
 
 
-def terminate_running_instances(install_dir: Path | None = None) -> None:
+def terminate_running_instances(install_dir: Path | None = None, *, portable_install: bool | None = None) -> None:
     """Stop only processes whose executable lives under the target install directory.
 
     Never kill Zapret_Hub.exe (or helpers) by image name alone — a portable copy
@@ -415,7 +415,7 @@ def terminate_running_instances(install_dir: Path | None = None) -> None:
     if not str(target_root).strip():
         return
 
-    portable_target = (target_root / "portable.flag").is_file()
+    portable_target = ((target_root / "portable.flag").is_file() if portable_install is None else bool(portable_install))
     if not portable_target:
         # These actions are machine/global state. A portable copy must not
         # remove the normal installation's Run entry or shared Zapret service.
@@ -503,7 +503,7 @@ def quarantine_item(path: Path) -> bool:
         return False
 
 
-def safe_remove_item(path: Path, install_dir: Path | None = None) -> None:
+def safe_remove_item(path: Path, install_dir: Path | None = None, *, portable_install: bool | None = None) -> None:
     for _ in range(6):
         try:
             if not path.exists():
@@ -515,7 +515,7 @@ def safe_remove_item(path: Path, install_dir: Path | None = None) -> None:
                 path.unlink()
             return
         except PermissionError:
-            terminate_running_instances(install_dir or path.parent)
+            terminate_running_instances(install_dir or path.parent, portable_install=portable_install)
             time.sleep(0.45)
         except Exception:
             if path.is_dir():
@@ -526,15 +526,17 @@ def safe_remove_item(path: Path, install_dir: Path | None = None) -> None:
         raise PermissionError(f"cannot replace: {path}")
 
 
-def wipe_install_dir(install_dir: Path) -> None:
+def wipe_install_dir(install_dir: Path, *, portable_install: bool | None = None) -> None:
     if not install_dir.exists():
         return
     ignored_leftovers = {"merged_runtime", "backups", "logs"}
+    if portable_install is None:
+        portable_install = (install_dir / "portable.flag").is_file()
     for _ in range(6):
-        terminate_running_instances(install_dir)
+        terminate_running_instances(install_dir, portable_install=portable_install)
         for item in list(install_dir.iterdir()):
             try:
-                safe_remove_item(item, install_dir)
+                safe_remove_item(item, install_dir, portable_install=portable_install)
             except Exception:
                 if item.name in ignored_leftovers:
                     if quarantine_item(item):
@@ -798,7 +800,7 @@ def perform_uninstall(install_dir: Path, progress_cb=None) -> None:
     portable_install = (install_dir / "portable.flag").is_file()
     uninstaller_log("uninstall_start", target=str(install_dir), portable=portable_install)
     report(10, tr("Остановка процессов...", "Stopping processes..."))
-    terminate_running_instances(install_dir)
+    terminate_running_instances(install_dir, portable_install=portable_install)
     if portable_install:
         report(28, tr("Ярлыки обычной установки сохранены.", "Normal-install shortcuts preserved."))
     else:
@@ -815,7 +817,7 @@ def perform_uninstall(install_dir: Path, progress_cb=None) -> None:
     report(84, tr("Удаление файлов приложения...", "Removing application files..."))
     if install_dir.exists():
         try:
-            wipe_install_dir(install_dir)
+            wipe_install_dir(install_dir, portable_install=portable_install)
         except Exception:
             launch_folder_removal(install_dir)
         else:
