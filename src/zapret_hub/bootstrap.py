@@ -26,6 +26,10 @@ from zapret_hub.services.settings import SettingsManager
 from zapret_hub.services.storage import StorageManager
 from zapret_hub.services.updates import UpdatesManager
 
+_PORTABLE_LEGACY_MARKER = "portable_legacy.flag"
+_PORTABLE_MIGRATION_ENV = "ZAPRET_HUB_MIGRATE_LEGACY_DATA"
+
+
 @dataclass(slots=True)
 class ApplicationContext:
     paths: AppPaths
@@ -298,14 +302,18 @@ def _resolve_work_root(install_root: Path) -> Path:
     base = Path(local_app_data) if local_app_data else Path.home() / "AppData" / "Local"
     if (install_root / "portable.flag").exists():
         target = install_root / "user_data"
-        # A portable build may be an upgrade of a previous build that stored its
-        # state in LocalAppData. Copy it once instead of starting with empty data;
-        # keep the source intact so rollback and recovery remain possible.
+        # Fresh portable copies must remain isolated from an installed Hub. A
+        # legacy migration is deliberately opt-in because LocalAppData may
+        # belong to a separate installation on the same machine.
+        migration_requested = (install_root / _PORTABLE_LEGACY_MARKER).exists() or (
+            str(os.environ.get(_PORTABLE_MIGRATION_ENV, "") or "").strip().lower()
+            in {"1", "true", "yes", "on"}
+        )
         try:
             target_has_entries = target.exists() and any(target.iterdir())
         except OSError:
             target_has_entries = True
-        if not target_has_entries:
+        if migration_requested and not target_has_entries:
             for legacy_name in ("Zapret_Hub", "Zapret Hub", "ZapretHub"):
                 legacy = base / legacy_name
                 try:
