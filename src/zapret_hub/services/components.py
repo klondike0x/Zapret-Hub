@@ -5237,12 +5237,33 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         proc = self._run_quiet(["sc", "query", service_name])
         if proc.returncode != 0:
             return "ABSENT"
+        # The STATE field label is localized on non-English Windows (e.g. Russian
+        # "СОСТОЯНИЕ"), so filtering on the word "STATE" never matches there and
+        # every healthy service would be reported UNKNOWN. The numeric service
+        # state code is locale-independent ("STATE : 4  RUNNING"), so key off the
+        # number. The trailing word must also be a known state name to avoid
+        # matching other "code + word" fields such as "TYPE : 1  KERNEL_DRIVER".
+        state_codes = {
+            1: "STOPPED",
+            2: "START_PENDING",
+            3: "STOP_PENDING",
+            4: "RUNNING",
+            5: "CONTINUE_PENDING",
+            6: "PAUSE_PENDING",
+            7: "PAUSED",
+        }
+        known_states = set(state_codes.values())
         for line in (proc.stdout or "").splitlines():
-            if "STATE" not in line.upper():
+            match = re.search(r":\s*(\d+)\s+([A-Z_]+)", line.upper())
+            if not match:
                 continue
-            match = re.search(r":\s*\d+\s+([A-Z_]+)", line.upper())
-            if match:
-                return match.group(1)
+            if match.group(2) not in known_states:
+                continue
+            try:
+                code = int(match.group(1))
+            except ValueError:
+                continue
+            return state_codes.get(code, "UNKNOWN")
         return "UNKNOWN"
 
     def _stop_hub_started_windivert_services(self, *, reason: str) -> tuple[bool, str]:
