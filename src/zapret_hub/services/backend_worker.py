@@ -4,6 +4,7 @@ import multiprocessing as mp
 import os
 import queue
 import tempfile
+import threading
 import time
 import traceback
 import uuid
@@ -11,7 +12,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QMetaObject, QObject, QTimer, Qt, Signal
 
 from zapret_hub.domain import FileRecord
 from zapret_hub.services.service_catalog import SERVICE_PRESETS, SERVICE_PRESET_IDS
@@ -1237,6 +1238,12 @@ class BackendWorkerClient(QObject):
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(80)
         self._poll_timer.timeout.connect(self._poll_results)
+        # Shutdown handshake state, shared between the GUI thread (poll timer)
+        # and whatever thread calls stop(). The poll path records any shutdown
+        # ack it happens to observe so a concurrent stop() never loses it.
+        self._polling_enabled = True
+        self._shutdown_lock = threading.Lock()
+        self._seen_shutdown: dict[str, bool] = {}
 
     @property
     def process_pid(self) -> int | None:
@@ -1275,6 +1282,8 @@ class BackendWorkerClient(QObject):
             pass
 
     def _poll_results(self) -> None:
+        if not self._polling_enabled:
+            return
         while True:
             try:
                 message = self._result_queue.get_nowait()
@@ -1282,6 +1291,13 @@ class BackendWorkerClient(QObject):
                 break
             if str(message.get("kind", "")) == "progress":
                 self.task_progress.emit(message)
+                continue
+            # Shutdown acks belong to stop(), which may be waiting from another
+            # thread. Never emit them as normal task results: record them so the
+            # stop() handshake converges even if this timer beats it to the queue.
+            if str(message.get("action", "")) == "shutdown":
+                with self._shutdown_lock:
+                    self._seen_shutdown[str(message.get("id", ""))] = bool(message.get("ok"))
                 continue
             task_id = str(message.get("id", ""))
             if task_id:
@@ -1302,11 +1318,20 @@ class BackendWorkerClient(QObject):
 
     def stop(self, *, timeout: float = 15.0) -> bool:
         shutdown_id = uuid.uuid4().hex
+        # Serialize the shutdown handshake: disable GUI polling first so the
+        # poll timer (a GUI-thread QTimer that may be firing concurrently on
+        # another thread) cannot consume the ack this loop is waiting for.
+        self._polling_enabled = False
+        # Stop the timer on its owning thread; invokeMethod is safe to call from
+        # a non-owning thread and queues the stop in the GUI event loop.
+        try:
+            QMetaObject.invokeMethod(self._poll_timer, "stop", Qt.QueuedConnection)
+        except Exception:
+            pass
         try:
             self._task_queue.put({"id": shutdown_id, "action": "shutdown", "payload": {}})
         except Exception:
             return False
-        self._poll_timer.stop()
         if self._process.is_alive():
             self._process.join(timeout=max(1.0, float(timeout)))
         result_ok = False
@@ -1317,6 +1342,15 @@ class BackendWorkerClient(QObject):
             try:
                 message = self._result_queue.get(timeout=0.1)
             except queue.Empty:
+                # A concurrent poll cycle may have drained the ack into the
+                # shared record before this loop read it; check that record.
+                with self._shutdown_lock:
+                    if shutdown_id in self._seen_shutdown:
+                        result_seen = True
+                        result_ok = self._seen_shutdown[shutdown_id]
+                        self._seen_shutdown.pop(shutdown_id, None)
+                        if not result_ok and not self._last_stop_error:
+                            self._last_stop_error = "backend shutdown reported failure"
                 continue
             except Exception:
                 result_ok = False
@@ -1325,6 +1359,10 @@ class BackendWorkerClient(QObject):
                 result_seen = True
                 result_ok = bool(message.get("ok"))
                 self._last_stop_error = str(message.get("error", "") or "")
+        with self._shutdown_lock:
+            if shutdown_id in self._seen_shutdown and not result_seen:
+                result_seen = True
+                result_ok = self._seen_shutdown.pop(shutdown_id)
         if self._process.is_alive():
             result_ok = False
             if not self._last_stop_error:
@@ -1338,8 +1376,12 @@ class BackendWorkerClient(QObject):
         return str(self._last_stop_error or "")
 
     def request_shutdown_background(self) -> None:
+        self._polling_enabled = False
         try:
             self._task_queue.put({"id": uuid.uuid4().hex, "action": "shutdown", "payload": {}})
         except Exception:
             pass
-        self._poll_timer.stop()
+        try:
+            self._poll_timer.stop()
+        except Exception:
+            pass
