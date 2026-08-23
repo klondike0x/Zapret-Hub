@@ -769,21 +769,9 @@ class WebBridge(QObject):
                         pass
                 backend = getattr(self.context, "backend", None)
                 if backend is not None:
-                    try:
-                        backend.request_shutdown_background()
-                    except Exception:
-                        pass
-                    try:
-                        process = getattr(backend, "_process", None)
-                        if process is not None and process.is_alive():
-                            process.join(timeout=1.5)
-                            if process.is_alive():
-                                process.terminate()
-                                process.join(timeout=1.0)
-                            if process.is_alive():
-                                process.kill()
-                    except Exception:
-                        pass
+                    if not backend.stop(timeout=15.0):
+                        reason = getattr(backend, "last_stop_error", "") or "backend or WinDivert cleanup did not complete"
+                        raise RuntimeError(reason)
                 self.context.updates.launch_update(prepared)
                 self._schedule_on_gui(self._quit_for_app_update)
             except Exception as error:

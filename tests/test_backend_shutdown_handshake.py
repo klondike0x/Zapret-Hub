@@ -61,6 +61,8 @@ def _make_client(*, alive: bool = True) -> BackendWorkerClient:
     client._polling_enabled = True
     client._shutdown_lock = threading.Lock()
     client._seen_shutdown = {}
+    client._stop_lock = threading.Lock()
+    client._stop_result = None
     client._last_stop_error = ""
     client._pending_tasks = set()
     client._cancel_paths = {}
@@ -116,6 +118,37 @@ def test_stop_sees_ack_drained_by_concurrent_poll() -> None:
 
     assert result is True
     assert client._last_stop_error == ""
+
+
+def test_stop_reuses_completed_result_without_second_handshake() -> None:
+    client = _make_client()
+    shutdown_requests = []
+
+    def acknowledge(item):
+        shutdown_requests.append(item)
+        client._result_queue.put(
+            {
+                "id": item["id"],
+                "action": "shutdown",
+                "ok": True,
+                "error": "",
+                "payload": {"shutdown": {"ok": True}},
+            }
+        )
+
+    client._task_queue.put = acknowledge  # type: ignore[method-assign]
+
+    import zapret_hub.services.backend_worker as mod
+
+    original = mod.QMetaObject.invokeMethod
+    mod.QMetaObject.invokeMethod = lambda *args, **kwargs: True  # type: ignore[attr-defined]
+    try:
+        assert client.stop(timeout=15.0) is True
+        assert client.stop(timeout=15.0) is True
+    finally:
+        mod.QMetaObject.invokeMethod = original  # type: ignore[attr-defined]
+
+    assert len(shutdown_requests) == 1
 
 
 def test_stop_reports_failure_when_worker_never_exits() -> None:

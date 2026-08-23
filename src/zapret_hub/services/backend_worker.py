@@ -1244,6 +1244,8 @@ class BackendWorkerClient(QObject):
         self._polling_enabled = True
         self._shutdown_lock = threading.Lock()
         self._seen_shutdown: dict[str, bool] = {}
+        self._stop_lock = threading.Lock()
+        self._stop_result: bool | None = None
 
     @property
     def process_pid(self) -> int | None:
@@ -1317,59 +1319,69 @@ class BackendWorkerClient(QObject):
             self._poll_timer.stop()
 
     def stop(self, *, timeout: float = 15.0) -> bool:
-        shutdown_id = uuid.uuid4().hex
-        # Serialize the shutdown handshake: disable GUI polling first so the
-        # poll timer (a GUI-thread QTimer that may be firing concurrently on
-        # another thread) cannot consume the ack this loop is waiting for.
-        self._polling_enabled = False
-        # Stop the timer on its owning thread; invokeMethod is safe to call from
-        # a non-owning thread and queues the stop in the GUI event loop.
-        try:
-            QMetaObject.invokeMethod(self._poll_timer, "stop", Qt.QueuedConnection)
-        except Exception:
-            pass
-        try:
-            self._task_queue.put({"id": shutdown_id, "action": "shutdown", "payload": {}})
-        except Exception:
-            return False
-        if self._process.is_alive():
-            self._process.join(timeout=max(1.0, float(timeout)))
-        result_ok = False
-        result_seen = False
-        self._last_stop_error = ""
-        deadline = time.monotonic() + 1.0
-        while not result_seen and time.monotonic() < deadline:
+        # Shutdown is intentionally idempotent: app updates stop the backend
+        # before handing control to the normal exit path, which calls stop()
+        # once more. Reuse the acknowledged result instead of sending a new
+        # request to a worker that has already exited.
+        with self._stop_lock:
+            if self._stop_result is not None:
+                return self._stop_result
+            shutdown_id = uuid.uuid4().hex
+            # Serialize the shutdown handshake: disable GUI polling first so the
+            # poll timer (a GUI-thread QTimer that may be firing concurrently on
+            # another thread) cannot consume the ack this loop is waiting for.
+            self._polling_enabled = False
+            # Stop the timer on its owning thread; invokeMethod is safe to call from
+            # a non-owning thread and queues the stop in the GUI event loop.
             try:
-                message = self._result_queue.get(timeout=0.1)
-            except queue.Empty:
-                # A concurrent poll cycle may have drained the ack into the
-                # shared record before this loop read it; check that record.
-                with self._shutdown_lock:
-                    if shutdown_id in self._seen_shutdown:
-                        result_seen = True
-                        result_ok = self._seen_shutdown[shutdown_id]
-                        self._seen_shutdown.pop(shutdown_id, None)
-                        if not result_ok and not self._last_stop_error:
-                            self._last_stop_error = "backend shutdown reported failure"
-                continue
+                QMetaObject.invokeMethod(self._poll_timer, "stop", Qt.QueuedConnection)
             except Exception:
-                result_ok = False
-                break
-            if str(message.get("id", "")) == shutdown_id:
-                result_seen = True
-                result_ok = bool(message.get("ok"))
-                self._last_stop_error = str(message.get("error", "") or "")
-        with self._shutdown_lock:
-            if shutdown_id in self._seen_shutdown and not result_seen:
-                result_seen = True
-                result_ok = self._seen_shutdown.pop(shutdown_id)
-        if self._process.is_alive():
+                pass
+            try:
+                self._task_queue.put({"id": shutdown_id, "action": "shutdown", "payload": {}})
+            except Exception:
+                self._stop_result = False
+                return False
+            if self._process.is_alive():
+                self._process.join(timeout=max(1.0, float(timeout)))
             result_ok = False
-            if not self._last_stop_error:
-                self._last_stop_error = "backend worker did not stop before timeout"
-            self._process.terminate()
-            self._process.join(timeout=3)
-        return bool(result_seen and result_ok and not self._process.is_alive())
+            result_seen = False
+            self._last_stop_error = ""
+            deadline = time.monotonic() + 1.0
+            while not result_seen and time.monotonic() < deadline:
+                try:
+                    message = self._result_queue.get(timeout=0.1)
+                except queue.Empty:
+                    # A concurrent poll cycle may have drained the ack into the
+                    # shared record before this loop read it; check that record.
+                    with self._shutdown_lock:
+                        if shutdown_id in self._seen_shutdown:
+                            result_seen = True
+                            result_ok = self._seen_shutdown[shutdown_id]
+                            self._seen_shutdown.pop(shutdown_id, None)
+                            if not result_ok and not self._last_stop_error:
+                                self._last_stop_error = "backend shutdown reported failure"
+                    continue
+                except Exception:
+                    result_ok = False
+                    break
+                if str(message.get("id", "")) == shutdown_id:
+                    result_seen = True
+                    result_ok = bool(message.get("ok"))
+                    self._last_stop_error = str(message.get("error", "") or "")
+            with self._shutdown_lock:
+                if shutdown_id in self._seen_shutdown and not result_seen:
+                    result_seen = True
+                    result_ok = self._seen_shutdown.pop(shutdown_id)
+            if self._process.is_alive():
+                result_ok = False
+                if not self._last_stop_error:
+                    self._last_stop_error = "backend worker did not stop before timeout"
+                self._process.terminate()
+                self._process.join(timeout=3)
+            self._stop_result = bool(result_seen and result_ok and not self._process.is_alive())
+            return self._stop_result
+
 
     @property
     def last_stop_error(self) -> str:
