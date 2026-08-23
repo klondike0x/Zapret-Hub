@@ -87,3 +87,68 @@ def test_state_code_regex_does_not_match_hex_fields() -> None:
     pattern = re.compile(r":\s*(\d+)\s+([A-Z_]+)")
     for line in ("CHECKPOINT         : 0x0", "WAIT_HINT          : 0x0"):
         assert pattern.search(line.upper()) is None
+
+
+def _image_path_from_output(stdout: str) -> str:
+    manager = ProcessManager.__new__(ProcessManager)
+
+    def fake_run_quiet(command):
+        return SimpleNamespace(returncode=0, stdout=stdout)
+
+    manager._run_quiet = fake_run_quiet
+    return manager._service_image_path_raw(_SERVICE_NAME)
+
+
+def test_service_image_path_parses_english_label() -> None:
+    output = (
+        "SERVICE_NAME: WinDivert\n"
+        "        TYPE               : 1  KERNEL_DRIVER\n"
+        "        START_TYPE         : 3   DEMAND_START\n"
+        "        ERROR_CONTROL      : 1   NORMAL\n"
+        '        BINARY_PATH_NAME   : C:\\Windows\\system32\\drivers\\WinDivert64.sys\n'
+        "        LOAD_ORDER_GROUP   :\n"
+        "        TAG                : 0\n"
+        "        DISPLAY_NAME       : WinDivert\n"
+    )
+    assert _image_path_from_output(output) == r"C:\Windows\system32\drivers\WinDivert64.sys"
+
+
+def test_service_image_path_parses_localized_label() -> None:
+    # Russian Windows localizes the BINARY_PATH_NAME label; the path value stays.
+    output = (
+        "SERVICE_NAME: WinDivert\n"
+        "        TYPE               : 1  KERNEL_DRIVER\n"
+        "        START_TYPE         : 3   DEMAND_START\n"
+        '        ИМЯ_ДВОИЧНОГО_ПУТИ : C:\\Windows\\system32\\drivers\\WinDivert64.sys\n'
+        "        LOAD_ORDER_GROUP   :\n"
+        "        DISPLAY_NAME       : WinDivert\n"
+    )
+    assert _image_path_from_output(output) == r"C:\Windows\system32\drivers\WinDivert64.sys"
+
+
+def test_service_image_path_parses_driver_prefix_path() -> None:
+    output = (
+        "SERVICE_NAME: WinDivert\n"
+        '        BINARY_PATH_NAME   : \\??\\C:\\Windows\\system32\\drivers\\WinDivert64.sys\n'
+    )
+    assert _image_path_from_output(output) == r"\??\C:\Windows\system32\drivers\WinDivert64.sys"
+
+
+def test_service_image_path_empty_when_no_path_present() -> None:
+    output = (
+        "SERVICE_NAME: WinDivert\n"
+        "        TYPE               : 1  KERNEL_DRIVER\n"
+        "        START_TYPE         : 3   DEMAND_START\n"
+        "        DISPLAY_NAME       : WinDivert\n"
+    )
+    assert _image_path_from_output(output) == ""
+
+
+def test_service_image_path_absent_on_nonzero_exit() -> None:
+    manager = ProcessManager.__new__(ProcessManager)
+
+    def fake_run_quiet(command):
+        return SimpleNamespace(returncode=1060, stdout="[SC] OpenService FAILED 1060")
+
+    manager._run_quiet = fake_run_quiet
+    assert manager._service_image_path_raw(_SERVICE_NAME) == ""

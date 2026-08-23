@@ -5614,10 +5614,17 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         proc = self._run_quiet(["sc", "qc", service_name])
         if proc.returncode != 0:
             return ""
+        # The field labels in `sc qc` output are localized on non-English
+        # Windows (e.g. Russian), so do not match on "BINARY_PATH_NAME". The
+        # image path is the only value that looks like a filesystem path
+        # (contains a backslash), so select that line regardless of its label.
         for line in (proc.stdout or "").splitlines():
-            if "BINARY_PATH_NAME" not in line:
+            if ":" not in line:
                 continue
-            return line.split(":", 1)[-1].strip().strip('"')
+            value = line.split(":", 1)[-1].strip().strip('"')
+            if not value or "\\" not in value:
+                continue
+            return value
         return ""
 
     def _normalize_driver_image_path(self, image_path: str) -> str:
