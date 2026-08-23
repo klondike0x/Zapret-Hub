@@ -881,3 +881,33 @@ def test_configured_site_probes_are_bounded_and_fair(tmp_path: Path, monkeypatch
     engine._last_site_scan_at = -10_000.0
     engine._configured_site_incident(settings, learner, [])
     assert [domain for domain, _ in calls[2:]] == ["site-2.example", "site-3.example"]
+
+
+def test_probe_https_classifies_451_as_block_but_keeps_gateway_4xx_ok(monkeypatch):
+    from urllib.error import HTTPError
+
+    from zapret_hub.services.orchestrator import signals as signals_module
+
+    collector = signals_module.SignalCollector()
+
+    def reject(url, *, code: int):
+        raise HTTPError(url, code, f"HTTP {code}", hdrs=None, fp=None)
+
+    monkeypatch.setattr(
+        signals_module.urllib.request,
+        "urlopen",
+        lambda request, timeout: reject(request.full_url, code=451),
+    )
+    blocked = collector.probe_https("https://rutracker.org", timeout_s=0.1)
+    assert blocked.ok is False
+    assert blocked.error == "http_451"
+    assert blocked.cls == "http_block"
+
+    monkeypatch.setattr(
+        signals_module.urllib.request,
+        "urlopen",
+        lambda request, timeout: reject(request.full_url, code=403),
+    )
+    gateway_response = collector.probe_https("https://example.org", timeout_s=0.1)
+    assert gateway_response.ok is True
+    assert gateway_response.cls == "ok"

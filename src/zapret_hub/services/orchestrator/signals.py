@@ -33,6 +33,7 @@ class ConnSample:
 
 _DISCORD_VOICE_UDP_PORTS = frozenset(range(19294, 19345)) | frozenset(range(50000, 50101))
 _INTERESTING_UDP_PORTS = frozenset({3478, 3479, 3480, 5222, 5060, 5062, 443}) | _DISCORD_VOICE_UDP_PORTS
+_EXPLICIT_HTTP_BLOCK_CODES = frozenset({451})
 
 
 def is_interesting_udp_port(port: int) -> bool:
@@ -133,9 +134,11 @@ class SignalCollector:
                 cls="ok",
             )
         except HTTPError as error:
-            # A 4xx response proves DNS, TCP and TLS connectivity. Many service
-            # gateways intentionally reject a generic orchestrator GET request.
-            if 400 <= int(error.code) < 500:
+            code = int(error.code)
+            # Most 4xx responses are gateway/anti-bot responses and still prove
+            # that the site is reachable. HTTP 451 is an explicit legal/DPI
+            # block, so configured-site probes must report it as a failure.
+            if 400 <= code < 500 and code not in _EXPLICIT_HTTP_BLOCK_CODES:
                 return ProbeResult(
                     ok=True,
                     target=url,
@@ -143,12 +146,12 @@ class SignalCollector:
                     kind="http",
                     cls="ok",
                 )
-            cls = _classify_error(str(error), kind="http")
+            cls = _classify_error(f"http_{code}", kind="http")
             return ProbeResult(
                 ok=False,
                 target=url,
                 latency_ms=(time.perf_counter() - started) * 1000.0,
-                error=str(error),
+                error=f"http_{code}",
                 kind="http",
                 cls=cls,
             )
