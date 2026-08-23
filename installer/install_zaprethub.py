@@ -547,13 +547,14 @@ def _fetch_latest_release_page(
     if not re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}(?:[-+][0-9A-Za-z.-]+)?", version):
         raise ValueError(tr("GitHub вернул некорректную версию релиза.", "GitHub returned an invalid release version."))
     encoded_tag = tag.replace(" ", "%20")
+    # The release workflow currently publishes only the x64 portable archive.
+    # Do not advertise an ARM64 URL that will deterministically return 404.
     assets = {
-        arch: {
-            "name": f"zapret_hub_{version}_portable_win_{arch_name}.zip",
-            "download_url": f"{RELEASES_DOWNLOAD_URL}/{encoded_tag}/zapret_hub_{version}_portable_win_{arch_name}.zip",
+        "x64": {
+            "name": f"zapret_hub_{version}_portable_win_x64.zip",
+            "download_url": f"{RELEASES_DOWNLOAD_URL}/{encoded_tag}/zapret_hub_{version}_portable_win_x64.zip",
             "size": 0,
         }
-        for arch, arch_name in (("x64", "x64"), ("arm64", "arm64"))
     }
     return {
         "version": version,
@@ -654,12 +655,20 @@ def _download_payload_from_mirror(
         _installer_log("download_metadata_ok", keys=sorted(str(k) for k in release.keys())[:12])
         report(4, tr("Метаданные получены, подготовка загрузки…", "Metadata received, preparing download…"))
         remote_version = _remote_release_version(release)
-        asset_key = "arm64" if detect_payload_name() == "win_arm64.zip" else "x64"
+        payload_name = detect_payload_name()
+        asset_key = "arm64" if payload_name == "win_arm64.zip" else "x64"
         asset = dict((release.get("assets") or {}).get(asset_key) or {})
         download_url = str(asset.get("download_url") or "").strip()
         if not download_url:
-            download_url = ""
-        archive_path = temp_root / detect_payload_name()
+            if asset_key == "arm64":
+                raise RuntimeError(
+                    tr(
+                        "Нативная ARM64-сборка пока не публикуется.",
+                        "A native ARM64 build is not published yet.",
+                    )
+                )
+            raise RuntimeError(tr("Не найден пакет для вашей архитектуры.", "No package was found for your architecture."))
+        archive_path = temp_root / payload_name
         digest = hashlib.sha256()
         downloaded = 0
         expected_size = int(asset.get("size") or 0)

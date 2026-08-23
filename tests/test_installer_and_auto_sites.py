@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import pytest
 from pathlib import Path
 
 from installer import install_zaprethub as installer
@@ -40,9 +41,27 @@ def test_installer_latest_page_fallback_builds_direct_assets(monkeypatch) -> Non
     )
     release = installer._fetch_latest_release_page()
     assert release["version"] == "3.0.2"
+    assert set(release["assets"]) == {"x64"}
     assert release["assets"]["x64"]["download_url"].endswith(
         "/releases/download/v3.0.2/zapret_hub_3.0.2_portable_win_x64.zip"
     )
+
+
+def test_installer_reports_unsupported_arm64_without_fallback_asset(monkeypatch) -> None:
+    monkeypatch.setattr(installer, "_native_windows_machine", lambda: "arm64")
+    monkeypatch.setattr(
+        installer,
+        "_fetch_mirror_release",
+        lambda **kwargs: {
+            "version": "3.0.3",
+            "assets": {
+                "x64": {"download_url": "https://example.test/x64.zip", "size": 0},
+            },
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="ARM64"):
+        installer._download_payload_from_mirror(progress_cb=lambda *args, **kwargs: None)
 
 
 def test_installer_strips_portable_marker_from_extracted_payload(tmp_path: Path) -> None:
