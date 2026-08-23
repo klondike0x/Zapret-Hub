@@ -648,9 +648,31 @@ class ProcessManager:
             return state
         if component_id == "tg-ws-proxy":
             settings = self.settings.get()
+            process = self._processes.get(component_id)
+            if process and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=4)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        pass
+            if process and process.pid:
+                self._run_quiet(["taskkill", "/PID", str(process.pid), "/F", "/T"])
+            self._processes.pop(component_id, None)
             self._kill_image("TgWsProxy_windows.exe")
             self._close_source_log_stream("tg-ws-proxy")
-            still_listening = self._is_port_listening(settings.tg_proxy_host, int(settings.tg_proxy_port))
+            port_key = (str(settings.tg_proxy_host or ""), int(settings.tg_proxy_port))
+            self._port_listening_cache.pop(port_key, None)
+            still_listening = True
+            for _ in range(20):
+                self._port_listening_cache.pop(port_key, None)
+                if not self._is_port_listening(*port_key):
+                    still_listening = False
+                    break
+                time.sleep(0.1)
             state.status = "running" if still_listening else "stopped"
             state.pid = None
             if still_listening:
