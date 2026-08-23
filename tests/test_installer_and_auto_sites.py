@@ -129,13 +129,22 @@ def test_portable_uninstaller_preserves_installed_registration(tmp_path: Path, m
     install_dir = tmp_path / "Portable Zapret Hub"
     install_dir.mkdir(parents=True)
     (install_dir / "portable.flag").write_text("", encoding="utf-8")
-    calls: list[str] = []
+    calls: list[object] = []
     monkeypatch.setattr(installer_common, "remove_shortcuts", lambda: calls.append("shortcuts"))
-    monkeypatch.setattr(installer_common, "remove_uninstall_registry", lambda: calls.append("registry"))
+    monkeypatch.setattr(installer_common, "remove_uninstall_registry", lambda *args: calls.append(("registry", args)))
 
     installer_common.perform_uninstall(install_dir)
 
-    assert calls == []
+    assert calls == [("registry", (install_dir,))]
+
+
+def test_registry_cleanup_requires_matching_install_location(tmp_path: Path) -> None:
+    installed_root = tmp_path / "Installed Zapret Hub"
+    portable_root = tmp_path / "Portable Zapret Hub"
+
+    assert installer_common._registry_entry_belongs_to(portable_root, str(portable_root)) is True
+    assert installer_common._registry_entry_belongs_to(portable_root, str(installed_root)) is False
+    assert installer_common._registry_entry_belongs_to(portable_root, "") is False
 
 
 def test_auto_site_catalog_loads_user_domains(tmp_path: Path) -> None:

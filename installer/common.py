@@ -579,7 +579,14 @@ def remove_app_data(install_dir: Path | None = None) -> None:
             quarantine_item(path)
 
 
-def remove_uninstall_registry() -> None:
+def _registry_entry_belongs_to(install_dir: Path, registered_location: str | None) -> bool:
+    location = str(registered_location or "").strip()
+    if not location:
+        return False
+    return _normalized_path_text(install_dir) == _normalized_path_text(Path(location))
+
+
+def remove_uninstall_registry(install_dir: Path | None = None) -> None:
     if not sys.platform.startswith("win"):
         return
     for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
@@ -587,10 +594,17 @@ def remove_uninstall_registry() -> None:
             access = winreg.KEY_WRITE
             if root == winreg.HKEY_LOCAL_MACHINE:
                 access |= winreg.KEY_WOW64_64KEY
+            if install_dir is not None:
+                read_access = winreg.KEY_READ
+                if root == winreg.HKEY_LOCAL_MACHINE:
+                    read_access |= winreg.KEY_WOW64_64KEY
+                with winreg.OpenKey(root, UNINSTALL_KEY, 0, read_access) as key:
+                    registered_location, _ = winreg.QueryValueEx(key, "InstallLocation")
+                if not _registry_entry_belongs_to(install_dir, str(registered_location)):
+                    continue
             winreg.DeleteKeyEx(root, UNINSTALL_KEY, access=access, reserved=0)
         except Exception:
             continue
-
 
 def launch_folder_removal(install_dir: Path) -> None:
     """Delete the installation directory after the uninstaller exits."""
@@ -780,7 +794,8 @@ def perform_uninstall(install_dir: Path, progress_cb=None) -> None:
     report(46, tr("Удаление пользовательских данных...", "Removing user data..."))
     remove_app_data(install_dir)
     if portable_install:
-        report(68, tr("Регистрация обычной установки сохранена.", "Normal-install registration preserved."))
+        report(68, tr("Удаление регистрации portable-копии...", "Removing portable registration..."))
+        remove_uninstall_registry(install_dir)
     else:
         report(68, tr("Удаление записи в Параметрах Windows...", "Removing Windows Apps entry..."))
         remove_uninstall_registry()
