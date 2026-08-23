@@ -11,13 +11,13 @@ class AppShutdownBoundTests(unittest.TestCase):
 
         # The direct (backend-not-attached) path must not run stop_all() on the
         # GUI thread synchronously; it delegates to the bounded helper.
-        self.assertIn("_start_bounded_direct_cleanup(context)", cleanup)
+        self.assertIn("_start_bounded_direct_cleanup(context, stop_backend=context.backend is not None)", cleanup)
         self.assertIn("context.processes.stop_all()", cleanup)
         self.assertLess(cleanup.index("context.processes.stop_all()"), cleanup.index("context.backend.stop"))
 
     def test_direct_cleanup_runs_on_background_thread_with_deadline(self) -> None:
         source = APP_SOURCE.read_text(encoding="utf-8")
-        helper = source.split("def _start_bounded_direct_cleanup(context) -> None:", 1)[1].split("app.aboutToQuit.connect", 1)[0]
+        helper = source.split("def _start_bounded_direct_cleanup(context, *, stop_backend: bool = False) -> None:", 1)[1].split("app.aboutToQuit.connect", 1)[0]
 
         # stop_all() is executed off the GUI thread...
         self.assertIn("threading.Thread(target=_bounded_stop", helper)
