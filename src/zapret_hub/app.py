@@ -386,6 +386,7 @@ def run(argv: list[str] | None = None) -> int:
                     return
                 try:
                     if context.backend is not None:
+                        context.processes.stop_all()
                         context.backend.stop(timeout=15.0)
                     else:
                         _start_bounded_direct_cleanup(context)

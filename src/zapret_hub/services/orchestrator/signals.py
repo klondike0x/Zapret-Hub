@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import queue
 import socket
 import ssl
+import threading
 import time
 import urllib.request
 from urllib.error import HTTPError
@@ -110,7 +112,31 @@ class SignalCollector:
         self._toolhelp_cache: dict[int, str] = {}
         self._toolhelp_at = 0.0
 
-    def probe_https(self, url: str, timeout_s: float = 4.0) -> ProbeResult:
+    @staticmethod
+    def _run_bounded_probe(operation, *, timeout_s: float, timeout_result: ProbeResult) -> ProbeResult:
+        """Return before the stage budget even if a library blocks per operation."""
+        budget = max(0.0, float(timeout_s))
+        if budget <= 0.0:
+            return timeout_result
+        results = queue.Queue(maxsize=1)
+
+        def run() -> None:
+            try:
+                results.put(operation())
+            except BaseException as error:
+                results.put(error)
+
+        worker = threading.Thread(target=run, daemon=True, name="zapret-hub-probe")
+        worker.start()
+        worker.join(timeout=budget)
+        if worker.is_alive():
+            return timeout_result
+        result = results.get_nowait()
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    def _probe_https_once(self, url: str, *, timeout_s: float) -> ProbeResult:
         started = time.perf_counter()
         try:
             request = urllib.request.Request(url, method="GET", headers={"User-Agent": "ZapretHub-Orchestrator/1.0"})
@@ -166,12 +192,30 @@ class SignalCollector:
                 cls=cls,
             )
 
-    def probe_tls(self, host: str, port: int = 443, timeout_s: float = 3.5) -> ProbeResult:
+    def probe_https(self, url: str, timeout_s: float = 4.0) -> ProbeResult:
+        started = time.perf_counter()
+        timeout = max(0.0, float(timeout_s))
+        return self._run_bounded_probe(
+            lambda: self._probe_https_once(url, timeout_s=timeout),
+            timeout_s=timeout,
+            timeout_result=ProbeResult(
+                ok=False,
+                target=url,
+                latency_ms=(time.perf_counter() - started) * 1000.0,
+                error="probe_timeout",
+                kind="http",
+                cls="tcp_timeout",
+            ),
+        )
+
+    def _probe_tls_once(self, host: str, port: int, *, timeout_s: float) -> ProbeResult:
         started = time.perf_counter()
         try:
             context = ssl.create_default_context()
             with socket.create_connection((host, port), timeout=timeout_s) as sock:
-                with context.wrap_socket(sock, server_hostname=host) as tls:
+                sock.settimeout(max(0.001, timeout_s))
+                with context.wrap_socket(sock, server_hostname=host, do_handshake_on_connect=False) as tls:
+                    tls.settimeout(max(0.001, timeout_s))
                     tls.do_handshake()
             return ProbeResult(
                 ok=True,
@@ -188,6 +232,21 @@ class SignalCollector:
                 error=str(error),
                 cls=cls,
             )
+
+    def probe_tls(self, host: str, port: int = 443, timeout_s: float = 3.5) -> ProbeResult:
+        started = time.perf_counter()
+        timeout = max(0.0, float(timeout_s))
+        return self._run_bounded_probe(
+            lambda: self._probe_tls_once(host, port, timeout_s=timeout),
+            timeout_s=timeout,
+            timeout_result=ProbeResult(
+                ok=False,
+                target=f"{host}:{port}",
+                latency_ms=(time.perf_counter() - started) * 1000.0,
+                error="probe_timeout",
+                cls="tcp_timeout",
+            ),
+        )
 
     def probe_host_access(self, host: str, *, timeout_s: float = 4.0) -> ProbeResult:
         """Production verdict: TLS handshake AND HTTPS GET must succeed.

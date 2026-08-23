@@ -33,6 +33,8 @@ class TrayRestoreTests(unittest.TestCase):
 
         # Graceful cleanup is preserved (non-daemon wait for WinDivert/backend).
         self.assertIn("threading.Thread(target=shutdown, daemon=False", exit_fn)
+        self.assertIn("context.processes.stop_all()", exit_fn)
+        self.assertLess(exit_fn.index("context.processes.stop_all()"), exit_fn.index("context.backend.stop"))
         self.assertIn('name="zapret-hub-shutdown"', exit_fn)
         # ...but a hang in untimed cleanup subprocesses must not strand the app.
         self.assertIn("self._shutdown_watchdog = QTimer(self)", exit_fn)

@@ -4515,15 +4515,27 @@ class WebMainWindow(QMainWindow):
                     except Exception:
                         pass
                 if context is not None:
-                    if context.backend is not None:
-                        success = bool(context.backend.stop(timeout=15.0))
-                        if not success:
-                            failure_reason = getattr(context.backend, "last_stop_error", "") or "backend or WinDivert cleanup did not complete"
-                    else:
+                    # Components are launched by the GUI-owned ProcessManager.
+                    # The backend worker has a separate ProcessManager and does
+                    # not own the GUI's WinDivert service state.
+                    gui_ok = True
+                    gui_reason = ""
+                    try:
                         context.processes.stop_all()
-                        result = context.processes.last_shutdown_result
-                        success = bool(result.get("ok", False))
-                        failure_reason = str(result.get("reason", "") or "")
+                        gui_result = context.processes.last_shutdown_result
+                        gui_ok = bool(gui_result.get("ok", False))
+                        gui_reason = str(gui_result.get("reason", "") or "")
+                    except Exception as error:
+                        gui_ok = False
+                        gui_reason = str(error)
+                    backend_ok = True
+                    backend_reason = ""
+                    if context.backend is not None:
+                        backend_ok = bool(context.backend.stop(timeout=15.0))
+                        if not backend_ok:
+                            backend_reason = getattr(context.backend, "last_stop_error", "") or "backend worker cleanup did not complete"
+                    success = bool(gui_ok and backend_ok)
+                    failure_reason = "; ".join(item for item in (gui_reason, backend_reason) if item)
             except Exception as error:
                 success = False
                 failure_reason = str(error)

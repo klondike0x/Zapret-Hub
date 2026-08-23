@@ -942,3 +942,24 @@ def test_probe_host_access_shares_one_deadline(monkeypatch):
     assert [kind for kind, _ in calls] == ["tls", "http"]
     assert 1.99 <= calls[0][1] <= 2.01
     assert 0.74 <= calls[1][1] <= 0.76
+
+def test_probe_stage_wrapper_enforces_wall_clock_timeout():
+    import time
+
+    from zapret_hub.services.orchestrator import signals as signals_module
+
+    collector = signals_module.SignalCollector()
+
+    def stalled(*_args, **_kwargs):
+        time.sleep(0.2)
+        return ProbeResult(ok=True, target="example.org", latency_ms=1.0, cls="ok")
+
+    collector._probe_tls_once = stalled
+    tls = collector.probe_tls("example.org", timeout_s=0.02)
+    assert tls.ok is False
+    assert tls.error == "probe_timeout"
+
+    collector._probe_https_once = stalled
+    http = collector.probe_https("https://example.org", timeout_s=0.02)
+    assert http.ok is False
+    assert http.error == "probe_timeout"
