@@ -977,6 +977,21 @@ def _wipe_install_dir(install_dir: Path) -> None:
     raise PermissionError(f"cannot replace: {remaining}")
 
 
+def _strip_portable_marker(source_root: Path, staging: Path) -> None:
+    """Remove portable.flag from the extracted installer payload.
+
+    The published download is the portable ZIP, which legitimately carries
+    portable.flag; normal (non-portable) installations must not inherit it, or
+    the app would store user data beside the exe instead of LocalAppData.
+    """
+    for marker in (source_root / "portable.flag", staging / "portable.flag"):
+        try:
+            if marker.exists():
+                marker.unlink()
+        except OSError:
+            pass
+
+
 def _overlay_tree(
     source: Path,
     target: Path,
@@ -1204,6 +1219,13 @@ class InstallerWorker(QThread):
             if not source_root.exists():
                 source_root = staging
             _installer_log("source_root_resolved", source_root=str(source_root))
+
+            # The published payload is the portable ZIP, which legitimately
+            # contains portable.flag. A normal installation must not receive it:
+            # _resolve_work_root() would then treat a Program Files install as
+            # portable and store/migrate user data into the shared install dir
+            # instead of LocalAppData. Drop the marker before the overlay.
+            _strip_portable_marker(source_root, staging)
 
             preserved_names = {"merged_runtime", "backups", "logs", "uninstall_zaprethub.exe"}
             if self.preserve_data:

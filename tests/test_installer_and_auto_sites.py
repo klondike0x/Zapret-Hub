@@ -44,6 +44,40 @@ def test_installer_latest_page_fallback_builds_direct_assets(monkeypatch) -> Non
     )
 
 
+def test_installer_strips_portable_marker_from_extracted_payload(tmp_path: Path) -> None:
+    """The installer downloads the portable ZIP; overlay must not leak the marker."""
+    staging = tmp_path / "staging"
+    source_root = staging / "zapret_hub"
+    source_root.mkdir(parents=True)
+    (source_root / "portable.flag").write_text("", encoding="utf-8")
+    (source_root / "Zapret_Hub.exe").write_text("app", encoding="utf-8")
+
+    installer._strip_portable_marker(source_root, staging)
+
+    assert not (source_root / "portable.flag").exists()
+
+
+def test_installer_strips_portable_marker_when_zip_has_no_root_folder(tmp_path: Path) -> None:
+    """The portable ZIP may unpack directly into staging (no zapret_hub/ folder)."""
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "portable.flag").write_text("", encoding="utf-8")
+    (staging / "Zapret_Hub.exe").write_text("app", encoding="utf-8")
+
+    installer._strip_portable_marker(staging, staging)
+
+    assert not (staging / "portable.flag").exists()
+
+
+def test_installer_strips_portable_marker_is_idempotent_without_marker(tmp_path: Path) -> None:
+    staging = tmp_path / "staging"
+    source_root = staging / "zapret_hub"
+    source_root.mkdir(parents=True)
+    (source_root / "Zapret_Hub.exe").write_text("app", encoding="utf-8")
+
+    installer._strip_portable_marker(source_root, staging)  # must not raise
+
+
 def test_auto_site_catalog_loads_user_domains(tmp_path: Path) -> None:
     path = AutoSiteCatalog.path(tmp_path)
     path.write_text(
