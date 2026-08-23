@@ -4513,6 +4513,7 @@ class WebMainWindow(QMainWindow):
         self._dismantle_ui_immediately()
 
         context = self.context
+        shutdown_done = threading.Event()
 
         def shutdown() -> None:
             success = True
@@ -4543,10 +4544,39 @@ class WebMainWindow(QMainWindow):
                         context.logging.log("error", "Application shutdown failed", error=failure_reason)
                 except Exception:
                     pass
-            self.shutdown_finished.emit(success, failure_reason)
+            try:
+                self.shutdown_finished.emit(success, failure_reason)
+            finally:
+                shutdown_done.set()
 
         # Wait for child processes and the owned WinDivert service before Qt exits.
-        threading.Thread(target=shutdown, daemon=False, name="zapret-hub-shutdown").start()
+        shutdown_thread = threading.Thread(target=shutdown, daemon=False, name="zapret-hub-shutdown")
+        shutdown_thread.start()
+
+        app = QApplication.instance()
+        if app is None:
+            os._exit(0)
+        # Cleanup runs _run_quiet() subprocesses (sc / taskkill / ...) with no
+        # timeout, so the graceful path above could hang forever in the direct
+        # stop_all() branch (backend not attached yet) or on a stalled helper.
+        # Keep the graceful wait, but retain a bounded fallback: force exit if
+        # shutdown still has not finished when this watchdog fires.
+        self._shutdown_watchdog = QTimer(self)
+        self._shutdown_watchdog.setSingleShot(True)
+        self._shutdown_watchdog.timeout.connect(
+            lambda: self._force_exit_on_stalled_shutdown(shutdown_done, shutdown_thread)
+        )
+        self._shutdown_watchdog.start(30000)
+
+    def _force_exit_on_stalled_shutdown(self, shutdown_done: threading.Event, shutdown_thread: threading.Thread) -> None:
+        if shutdown_done.is_set() and not shutdown_thread.is_alive():
+            return
+        try:
+            if self.context is not None:
+                self.context.logging.log("error", "Application shutdown stalled", reason="cleanup exceeded deadline; forcing exit")
+        except Exception:
+            pass
+        os._exit(0)
 
     def _dismantle_ui_immediately(self) -> None:
         """Hide window and tray icon right away — do not wait for backend stop."""
