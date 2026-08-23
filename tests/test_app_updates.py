@@ -273,3 +273,6 @@ def test_update_helper_uses_fast_literal_copy_and_restart_retries(tmp_path, monk
         "ZapretHubApplicationUpdater"
     )
     assert script.index("Set-Content -LiteralPath $readyPath") > script.index("ZapretHubApplicationUpdater")
+    assert '$destinationPortable = Test-Path (Join-Path $dst "portable.flag")' in script
+    assert 'Remove-PathRobust $sourcePortableMarker' in script
+    assert 'portable marker stripped for installed update' in script

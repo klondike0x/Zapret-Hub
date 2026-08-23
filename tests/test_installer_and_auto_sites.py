@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-import pytest
 from pathlib import Path
 
+import pytest
+
 from installer import install_zaprethub as installer
+from installer import common as installer_common
 from installer.common import remove_app_data
 from zapret_hub.services.orchestrator.site_catalog import AutoSiteCatalog
 from zapret_hub.services.orchestrator.tuner import SmartTuner
@@ -121,6 +123,19 @@ def test_portable_uninstaller_keeps_installed_user_data(tmp_path: Path, monkeypa
     assert not (install_dir / "user_data").exists()
     assert (installed_data / "settings.json").read_text(encoding="utf-8") == "installed"
     assert (roaming_data / "settings.json").read_text(encoding="utf-8") == "installed-roaming"
+
+
+def test_portable_uninstaller_preserves_installed_registration(tmp_path: Path, monkeypatch) -> None:
+    install_dir = tmp_path / "Portable Zapret Hub"
+    install_dir.mkdir(parents=True)
+    (install_dir / "portable.flag").write_text("", encoding="utf-8")
+    calls: list[str] = []
+    monkeypatch.setattr(installer_common, "remove_shortcuts", lambda: calls.append("shortcuts"))
+    monkeypatch.setattr(installer_common, "remove_uninstall_registry", lambda: calls.append("registry"))
+
+    installer_common.perform_uninstall(install_dir)
+
+    assert calls == []
 
 
 def test_auto_site_catalog_loads_user_domains(tmp_path: Path) -> None:

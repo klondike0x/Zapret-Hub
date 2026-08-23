@@ -48,6 +48,8 @@ _PROCESS_FAIL_THRESHOLD = 1  # SYN_SENT from a known app is enough
 _BROWSER_FAIL_THRESHOLD = 4  # browsers flap SYN_SENT constantly — need stronger confirm
 _SCAN_INTERVAL_S = 4.0
 _SITE_SCAN_INTERVAL_S = 30.0
+_SITE_PROBE_MAX_PER_SCAN = 2
+_SITE_PROBE_BUDGET_S = 3.0
 _MAX_STEPS = 12
 _EXHAUSTED_COOLDOWN_S = 1800.0  # 30m — stop endless general retries on the same host
 _BROWSER_COOLDOWN_S = 3600.0  # after a failed browser tune, stay quiet
@@ -142,6 +144,7 @@ class OrchestratorEngine:
         self._loop_interval_s = 1.0
         self._last_scan_at = 0.0
         self._last_site_scan_at = 0.0
+        self._configured_site_cursor = 0
         self._mapper = ServiceMapper()
         self._signals = SignalCollector()
         self._tuner = SmartTuner()
@@ -1209,49 +1212,60 @@ class OrchestratorEngine:
         sites = AutoSiteCatalog.load(Path(self.context.paths.configs_dir), template_path=template)
         knowledge = getattr(self.context, "knowledge", None)
         selected = [str(item) for item in (settings.selected_service_ids or [])]
-        for site in sites:
-            for domain in site.domains:
-                if knowledge is not None and (
-                    knowledge.is_dead_host(domain) or knowledge.on_cooldown(f"host:{domain}")
-                ):
-                    continue
-                try:
-                    result = probe(domain, timeout_s=2.5)
-                except Exception as error:
-                    self._log(
-                        "warning",
-                        "Configured site probe failed",
-                        site=site.id,
-                        domain=domain,
-                        error=str(error),
-                    )
-                    continue
-                if result.ok:
-                    self._memory.reset_fail(domain)
-                    continue
-                in_lists = learner.domain_in_merged_lists(domain, lists_dirs)
-                symptom = classify_failure(result, domain_in_lists=in_lists)
-                if symptom == "dead_host":
-                    if knowledge is not None:
-                        knowledge.mark_dead_host(domain)
-                    continue
-                if self._memory.bump_fail(domain) < _FAIL_THRESHOLD:
-                    continue
-                return {
-                    "domain": domain,
-                    "ip": "",
-                    "process": "",
-                    "proto": "tcp",
-                    "remote_port": 443,
-                    "services": [],
-                    "symptom": symptom,
-                    "selected": selected,
-                    "domains": [domain],
-                    "ips": [],
-                    "domains_missing": [domain] if not in_lists else [],
-                    "site_id": site.id,
-                    "allow_strategy_after_list": True,
-                }
+        candidates = [(site, domain) for site in sites for domain in site.domains]
+        if not candidates:
+            return None
+        start = self._configured_site_cursor % len(candidates)
+        self._configured_site_cursor = start
+        deadline = time.monotonic() + _SITE_PROBE_BUDGET_S
+        count = min(_SITE_PROBE_MAX_PER_SCAN, len(candidates))
+        for offset in range(count):
+            site, domain = candidates[(start + offset) % len(candidates)]
+            self._configured_site_cursor = (start + offset + 1) % len(candidates)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            if knowledge is not None and (
+                knowledge.is_dead_host(domain) or knowledge.on_cooldown(f"host:{domain}")
+            ):
+                continue
+            try:
+                result = probe(domain, timeout_s=min(2.5, max(0.25, remaining)))
+            except Exception as error:
+                self._log(
+                    "warning",
+                    "Configured site probe failed",
+                    site=site.id,
+                    domain=domain,
+                    error=str(error),
+                )
+                continue
+            if result.ok:
+                self._memory.reset_fail(domain)
+                continue
+            in_lists = learner.domain_in_merged_lists(domain, lists_dirs)
+            symptom = classify_failure(result, domain_in_lists=in_lists)
+            if symptom == "dead_host":
+                if knowledge is not None:
+                    knowledge.mark_dead_host(domain)
+                continue
+            if self._memory.bump_fail(domain) < _FAIL_THRESHOLD:
+                continue
+            return {
+                "domain": domain,
+                "ip": "",
+                "process": "",
+                "proto": "tcp",
+                "remote_port": 443,
+                "services": [],
+                "symptom": symptom,
+                "selected": selected,
+                "domains": [domain],
+                "ips": [],
+                "domains_missing": [domain] if not in_lists else [],
+                "site_id": site.id,
+                "allow_strategy_after_list": True,
+            }
         return None
     def _handle_incident(self, incident: dict[str, Any]) -> None:
         if self.context is None or self._mode != "auto":

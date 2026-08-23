@@ -768,15 +768,22 @@ def perform_uninstall(install_dir: Path, progress_cb=None) -> None:
         except Exception:
             return
 
-    uninstaller_log("uninstall_start", target=str(install_dir))
+    portable_install = (install_dir / "portable.flag").is_file()
+    uninstaller_log("uninstall_start", target=str(install_dir), portable=portable_install)
     report(10, tr("Остановка процессов...", "Stopping processes..."))
     terminate_running_instances(install_dir)
-    report(28, tr("Удаление ярлыков...", "Removing shortcuts..."))
-    remove_shortcuts()
+    if portable_install:
+        report(28, tr("Ярлыки обычной установки сохранены.", "Normal-install shortcuts preserved."))
+    else:
+        report(28, tr("Удаление ярлыков...", "Removing shortcuts..."))
+        remove_shortcuts()
     report(46, tr("Удаление пользовательских данных...", "Removing user data..."))
     remove_app_data(install_dir)
-    report(68, tr("Удаление записи в Параметрах Windows...", "Removing Windows Apps entry..."))
-    remove_uninstall_registry()
+    if portable_install:
+        report(68, tr("Регистрация обычной установки сохранена.", "Normal-install registration preserved."))
+    else:
+        report(68, tr("Удаление записи в Параметрах Windows...", "Removing Windows Apps entry..."))
+        remove_uninstall_registry()
     report(84, tr("Удаление файлов приложения...", "Removing application files..."))
     if install_dir.exists():
         try:

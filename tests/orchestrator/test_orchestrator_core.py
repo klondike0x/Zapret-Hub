@@ -850,3 +850,34 @@ def test_tuner_discord_seed_batches_catalog():
     # Soft HTTPS miss: lists/services only — no GameFilter / strategy thrash.
     assert not any(step.kind == "game_filter" for step in steps)
     assert not any(step.kind == "general" for step in steps)
+
+
+def test_configured_site_probes_are_bounded_and_fair(tmp_path: Path, monkeypatch):
+    from zapret_hub.services.orchestrator import engine as engine_module
+
+    engine = engine_module.OrchestratorEngine()
+    settings = SimpleNamespace(selected_service_ids=[])
+    engine.context = SimpleNamespace(
+        settings=SimpleNamespace(get=lambda: settings),
+        paths=SimpleNamespace(configs_dir=tmp_path, install_root=tmp_path),
+        knowledge=None,
+        logging=None,
+    )
+    sites = [SimpleNamespace(id="site", domains=tuple(f"site-{i}.example" for i in range(5)))]
+    monkeypatch.setattr(engine_module.AutoSiteCatalog, "load", lambda *args, **kwargs: sites)
+    calls: list[tuple[str, float]] = []
+    engine._signals = SimpleNamespace(
+        probe_host_access=lambda domain, timeout_s: (
+            calls.append((domain, timeout_s)) or ProbeResult(ok=True, target=domain, latency_ms=1)
+        )
+    )
+    learner = SimpleNamespace(domain_in_merged_lists=lambda *args: False)
+
+    engine._configured_site_incident(settings, learner, [])
+    assert [domain for domain, _ in calls] == ["site-0.example", "site-1.example"]
+    assert len(calls) == 2
+    assert all(0 < timeout <= 2.5 for _, timeout in calls)
+
+    engine._last_site_scan_at = -10_000.0
+    engine._configured_site_incident(settings, learner, [])
+    assert [domain for domain, _ in calls[2:]] == ["site-2.example", "site-3.example"]
