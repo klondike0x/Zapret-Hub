@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from installer import install_zaprethub as installer
+from installer.common import remove_app_data
 from zapret_hub.services.orchestrator.site_catalog import AutoSiteCatalog
 from zapret_hub.services.orchestrator.tuner import SmartTuner
 
@@ -76,6 +77,31 @@ def test_installer_strips_portable_marker_is_idempotent_without_marker(tmp_path:
     (source_root / "Zapret_Hub.exe").write_text("app", encoding="utf-8")
 
     installer._strip_portable_marker(source_root, staging)  # must not raise
+
+
+def test_portable_uninstaller_keeps_installed_user_data(tmp_path: Path, monkeypatch) -> None:
+    install_dir = tmp_path / "Portable Zapret Hub"
+    (install_dir / "user_data").mkdir(parents=True)
+    (install_dir / "user_data" / "portable-settings.json").write_text("portable", encoding="utf-8")
+    (install_dir / "portable.flag").write_text("", encoding="utf-8")
+
+    local_app_data = tmp_path / "LocalAppData"
+    installed_data = local_app_data / "Zapret_Hub"
+    installed_data.mkdir(parents=True)
+    (installed_data / "settings.json").write_text("installed", encoding="utf-8")
+    roaming = tmp_path / "Roaming"
+    roaming_data = roaming / "Zapret_Hub"
+    roaming_data.mkdir(parents=True)
+    (roaming_data / "settings.json").write_text("installed-roaming", encoding="utf-8")
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    monkeypatch.setenv("APPDATA", str(roaming))
+    monkeypatch.setenv("ZAPRET_HUB_WORK_ROOT", str(tmp_path / "external-work-root"))
+
+    remove_app_data(install_dir)
+
+    assert not (install_dir / "user_data").exists()
+    assert (installed_data / "settings.json").read_text(encoding="utf-8") == "installed"
+    assert (roaming_data / "settings.json").read_text(encoding="utf-8") == "installed-roaming"
 
 
 def test_auto_site_catalog_loads_user_domains(tmp_path: Path) -> None:

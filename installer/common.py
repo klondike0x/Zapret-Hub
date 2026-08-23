@@ -540,6 +540,11 @@ def wipe_install_dir(install_dir: Path) -> None:
 
 
 def user_data_dirs(install_dir: Path | None = None) -> list[Path]:
+    # A portable uninstaller must never remove the shared LocalAppData state
+    # belonging to a separate normal installation on the same machine.
+    if install_dir is not None and (install_dir / "portable.flag").is_file():
+        return [install_dir / "user_data"]
+
     roots: list[Path] = []
     explicit = str(os.environ.get("ZAPRET_HUB_WORK_ROOT", "") or "").strip()
     if explicit:
