@@ -309,6 +309,12 @@ def install_dir_from_registry() -> Path | None:
 def resolve_install_dir(explicit: Path | None = None) -> Path:
     if explicit is not None:
         return explicit
+    # A portable uninstaller runs from the portable directory itself. Prefer
+    # that marker before the shared registry, which may point to a normal install.
+    if getattr(sys, "frozen", False):
+        portable = Path(sys.executable).resolve().parent
+        if (portable / "portable.flag").is_file() and looks_like_zapret_hub_dir(portable):
+            return portable
     from_registry = install_dir_from_registry()
     if from_registry is not None:
         return from_registry
@@ -317,7 +323,6 @@ def resolve_install_dir(explicit: Path | None = None) -> Path:
         if looks_like_zapret_hub_dir(portable):
             return portable
     return default_install_dir()
-
 
 def _run_hidden(command: list[str]) -> None:
     startup = None

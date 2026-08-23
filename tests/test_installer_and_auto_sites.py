@@ -173,6 +173,7 @@ def test_tuner_allows_strategy_after_configured_site_list() -> None:
     assert any(step.kind == "add_domain" for step in steps)
     assert any(step.kind == "general" for step in steps)
 
+
 def test_registry_discovery_ignores_portable_location(tmp_path: Path) -> None:
     normal = tmp_path / "normal"
     normal.mkdir()
@@ -182,3 +183,18 @@ def test_registry_discovery_ignores_portable_location(tmp_path: Path) -> None:
 
     assert installer_common._is_normal_install_location(normal)
     assert not installer_common._is_normal_install_location(portable)
+
+
+def test_resolve_install_dir_prefers_portable_runtime(tmp_path: Path, monkeypatch) -> None:
+    portable = tmp_path / "Portable Zapret Hub"
+    portable.mkdir()
+    (portable / "portable.flag").touch()
+    (portable / "uninstall_zaprethub.exe").write_bytes(b"portable")
+    normal = tmp_path / "Program Files" / "Zapret Hub"
+    normal.mkdir(parents=True)
+
+    monkeypatch.setattr(installer_common.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(installer_common.sys, "executable", str(portable / "uninstall_zaprethub.exe"))
+    monkeypatch.setattr(installer_common, "install_dir_from_registry", lambda: normal)
+
+    assert installer_common.resolve_install_dir() == portable
