@@ -894,6 +894,18 @@ class UpdatesManager:
             }}
             Add-Content -LiteralPath $logPath -Value ('[' + (Get-Date -Format s) + '] preserved user dirs')
 
+            # A portable archive is also used by the in-app updater. Keep its
+            # marker only when the existing destination is already portable;
+            # normal installations must continue using LocalAppData.
+            $destinationPortable = Test-Path (Join-Path $dst "portable.flag")
+            if (-not $destinationPortable) {{
+              $sourcePortableMarker = Join-Path $src "portable.flag"
+              if (Test-Path $sourcePortableMarker) {{
+                [void](Remove-PathRobust $sourcePortableMarker)
+                Add-UpdateLog "portable marker stripped for installed update"
+              }}
+            }}
+
             $sourceIsStandalone = Test-StandalonePayload $src
             if ($sourceIsStandalone) {{
               Add-UpdateLog 'standalone payload detected'

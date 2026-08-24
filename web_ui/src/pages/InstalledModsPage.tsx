@@ -276,7 +276,7 @@ export function InstalledModsPage() {
             <button
               type="button"
               onClick={() => setImportOpen(true)}
-              className="rounded-lg bg-[rgb(var(--page-accent-rgb))] px-3.5 py-1.5 text-[11px] font-medium text-white transition hover:brightness-110"
+              className="rounded-lg bg-accent px-3.5 py-1.5 text-[11px] font-medium text-accent-foreground transition hover:brightness-110"
             >
               {ru ? "Добавить" : "Add"}
             </button>
@@ -350,7 +350,7 @@ export function InstalledModsPage() {
             <button
               type="button"
               onClick={() => setImportOpen(true)}
-              className="rounded-lg bg-[rgb(var(--page-accent-rgb))] px-3.5 py-1.5 text-[11px] font-medium text-white transition hover:brightness-110"
+              className="rounded-lg bg-accent px-3.5 py-1.5 text-[11px] font-medium text-accent-foreground transition hover:brightness-110"
             >
               {ru ? "Добавить" : "Add"}
             </button>

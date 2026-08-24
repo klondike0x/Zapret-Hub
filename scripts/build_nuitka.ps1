@@ -2,7 +2,7 @@ param(
     [string]$Python = ".\.venv\Scripts\python.exe",
     [string]$OutputDir = "dist_nuitka",
     [string]$UninstallerSource = "",
-    [string]$Version = "3.0.2",
+    [string]$Version = "3.0.3",
     [ValidateSet("zig", "msvc", "mingw")]
     [string]$Compiler = "msvc"
 )
@@ -129,6 +129,12 @@ if (-not $distDir) {
     throw "Nuitka output directory (*.dist) not found in $OutputDir"
 }
 
+# Remove any stray portable marker so this shared *.dist can feed both the
+# installable build and the portable packaging step. The marker is added later
+# only by prepare_nuitka_release._package_portable(): an installed app (e.g.
+# under Program Files) must keep its data in LocalAppData, not beside the exe.
+Remove-Item -LiteralPath (Join-Path $distDir.FullName "portable.flag") -Force -ErrorAction SilentlyContinue
+
 # Keep only production WebEngine resources and the locales the application
 # actually exposes. This runs after Nuitka, so it also covers bundled Qt files.
 & $PythonExe scripts\prune_qt_runtime.py $distDir.FullName
@@ -150,9 +156,10 @@ if ($UninstallerSource) {
 }
 $uninstallerCandidates += @(
     (Join-Path $root "bundled_uninstaller\uninstall_zaprethub.exe"),
-    (Join-Path $root "dist_installer_3.0.2\uninstall_zaprethub.exe"),
+    (Join-Path $root "dist_installer_3.0.3\uninstall_zaprethub.exe"),
     (Join-Path $root "dist_installer\uninstall_zaprethub.exe")
 )
+$uninstallerCandidates += @(Get-ChildItem -LiteralPath $root -Directory -Filter "dist_installer*" -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.FullName "uninstall_zaprethub.exe" })
 $uninstallerCopied = $false
 foreach ($candidate in $uninstallerCandidates) {
     if ($candidate -and (Test-Path -LiteralPath $candidate)) {

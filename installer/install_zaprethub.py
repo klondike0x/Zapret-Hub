@@ -9,6 +9,7 @@ import json
 import locale
 import os
 import platform
+import re
 import shutil
 import socket
 import ssl
@@ -20,7 +21,7 @@ import time
 import zipfile
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 from urllib.request import Request, urlopen
 
 from installer.embedded_app_icon import APP_PNG_BASE64
@@ -349,6 +350,8 @@ def detect_payload_name() -> str:
 
 
 UPDATE_URL = "https://api.github.com/repos/klondike0x/zapret-hub-continuation/releases?per_page=10"
+LATEST_RELEASE_URL = "https://github.com/klondike0x/zapret-hub-continuation/releases/latest"
+RELEASES_DOWNLOAD_URL = "https://github.com/klondike0x/zapret-hub-continuation/releases/download"
 METADATA_TIMEOUT_SEC = 10.0
 DOWNLOAD_CONNECT_TIMEOUT_SEC = 12.0
 DOWNLOAD_STALL_TIMEOUT_SEC = 45.0
@@ -414,6 +417,11 @@ def _friendly_network_error(error: BaseException, *, context: str = "github.com"
             return tr(f"Ошибка HTTP {code}: {context} недоступен ({reason})", f"HTTP {code}: {context} unavailable ({reason})")
         if code == 404:
             return tr(f"Ошибка HTTP 404: сборка не найдена на {context}", f"HTTP 404: build not found on {context}")
+        if code in {403, 429} and "rate" in reason.lower():
+            return tr(
+                "GitHub временно ограничил запросы. Повторите установку позже.",
+                "GitHub temporarily rate-limited requests. Please try the installation again later.",
+            )
         return tr(f"Ошибка HTTP {code}: {reason}", f"HTTP {code}: {reason}")
     if isinstance(error, ssl.SSLError):
         return tr(f"Ошибка TLS при подключении к {context}", f"TLS error connecting to {context}")
@@ -449,7 +457,7 @@ def _friendly_network_error(error: BaseException, *, context: str = "github.com"
     return text
 
 
-def _urlopen_json(url: str, *, timeout: float, cancel_event: threading.Event | None = None) -> dict[str, object]:
+def _urlopen_json(url: str, *, timeout: float, cancel_event: threading.Event | None = None) -> object:
     _check_cancel(cancel_event)
     request = Request(url, headers={"User-Agent": f"Zapret-Hub-Installer/{INSTALLER_VERSION}"})
 
@@ -466,8 +474,6 @@ def _urlopen_json(url: str, *, timeout: float, cancel_event: threading.Event | N
         payload = json.loads(raw.decode("utf-8"))
     except json.JSONDecodeError as error:
         raise error
-    if not isinstance(payload, dict):
-        raise ValueError(tr("Некорректный формат метаданных обновления.", "Unexpected update metadata format."))
     return payload
 
 
@@ -490,8 +496,73 @@ def _fetch_mirror_release(*, timeout: float = METADATA_TIMEOUT_SEC, cancel_event
         _ensure_host_resolvable(UPDATE_URL, timeout=min(timeout, 8.0), cancel_event=cancel_event)
         payload = _urlopen_json(UPDATE_URL, timeout=timeout, cancel_event=cancel_event)
         return _normalize_github_release(payload)
-    except Exception as error:
-        raise RuntimeError(_friendly_network_error(error, context="github.com")) from error
+    except Exception as api_error:
+        # The unauthenticated GitHub API is frequently rate-limited behind shared
+        # VPN/NAT addresses. The public latest-release page is not subject to the
+        # same API quota and the portable asset names are deterministic.
+        try:
+            fallback = _fetch_latest_release_page(timeout=timeout, cancel_event=cancel_event)
+            _installer_log("download_metadata_api_fallback", error=str(api_error))
+            return fallback
+        except Exception as fallback_error:
+            api_message = _friendly_network_error(api_error, context="github.com")
+            fallback_message = _friendly_network_error(fallback_error, context="github.com")
+            raise RuntimeError(f"{api_message}; {fallback_message}") from api_error
+
+
+def _fetch_latest_release_page(
+    *, timeout: float = METADATA_TIMEOUT_SEC, cancel_event: threading.Event | None = None
+) -> dict[str, object]:
+    """Resolve a release without GitHub's rate-limited REST API."""
+    _ensure_host_resolvable(LATEST_RELEASE_URL, timeout=min(timeout, 8.0), cancel_event=cancel_event)
+    request = Request(
+        LATEST_RELEASE_URL,
+        headers={
+            "Accept": "text/html,application/xhtml+xml",
+            "User-Agent": f"Zapret-Hub-Installer/{INSTALLER_VERSION}",
+        },
+    )
+
+    def _load() -> tuple[int, bytes, str]:
+        with urlopen(request, timeout=timeout) as response:
+            status = int(getattr(response, "status", 0) or response.getcode() or 0)
+            return status, response.read(), str(response.geturl() or "")
+
+    status, raw, final_url = _run_with_deadline(_load, timeout=timeout + 1.0, cancel_event=cancel_event)
+    if status and status >= 400:
+        raise HTTPError(LATEST_RELEASE_URL, status, f"HTTP {status}", hdrs=None, fp=None)  # type: ignore[arg-type]
+
+    candidates = [final_url]
+    page = raw.decode("utf-8", errors="replace")
+    candidates.extend(f"/releases/tag/{tag}" for tag in re.findall(r"/releases/tag/([^\"'?#<>]+)", page, flags=re.IGNORECASE))
+    tag = ""
+    for candidate in candidates:
+        match = re.search(r"/releases/tag/([^/?#\"'<>]+)", str(candidate), flags=re.IGNORECASE)
+        if match:
+            tag = unquote(match.group(1)).strip()
+            break
+    if not tag:
+        raise ValueError(tr("Не удалось определить последнюю версию.", "Could not determine the latest release version."))
+    version = tag.lstrip("vV").strip()
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}(?:[-+][0-9A-Za-z.-]+)?", version):
+        raise ValueError(tr("GitHub вернул некорректную версию релиза.", "GitHub returned an invalid release version."))
+    encoded_tag = tag.replace(" ", "%20")
+    # The release workflow currently publishes only the x64 portable archive.
+    # Do not advertise an ARM64 URL that will deterministically return 404.
+    assets = {
+        "x64": {
+            "name": f"zapret_hub_{version}_portable_win_x64.zip",
+            "download_url": f"{RELEASES_DOWNLOAD_URL}/{encoded_tag}/zapret_hub_{version}_portable_win_x64.zip",
+            "size": 0,
+        }
+    }
+    return {
+        "version": version,
+        "tag": tag,
+        "changelog": "",
+        "github_url": f"https://github.com/klondike0x/zapret-hub-continuation/releases/tag/{encoded_tag}",
+        "assets": assets,
+    }
 
 
 def _normalize_github_release(payload: object) -> dict[str, object]:
@@ -584,12 +655,20 @@ def _download_payload_from_mirror(
         _installer_log("download_metadata_ok", keys=sorted(str(k) for k in release.keys())[:12])
         report(4, tr("Метаданные получены, подготовка загрузки…", "Metadata received, preparing download…"))
         remote_version = _remote_release_version(release)
-        asset_key = "arm64" if detect_payload_name() == "win_arm64.zip" else "x64"
+        payload_name = detect_payload_name()
+        asset_key = "arm64" if payload_name == "win_arm64.zip" else "x64"
         asset = dict((release.get("assets") or {}).get(asset_key) or {})
         download_url = str(asset.get("download_url") or "").strip()
         if not download_url:
-            download_url = ""
-        archive_path = temp_root / detect_payload_name()
+            if asset_key == "arm64":
+                raise RuntimeError(
+                    tr(
+                        "Нативная ARM64-сборка пока не публикуется.",
+                        "A native ARM64 build is not published yet.",
+                    )
+                )
+            raise RuntimeError(tr("Не найден пакет для вашей архитектуры.", "No package was found for your architecture."))
+        archive_path = temp_root / payload_name
         digest = hashlib.sha256()
         downloaded = 0
         expected_size = int(asset.get("size") or 0)
@@ -907,6 +986,21 @@ def _wipe_install_dir(install_dir: Path) -> None:
     raise PermissionError(f"cannot replace: {remaining}")
 
 
+def _strip_portable_marker(source_root: Path, staging: Path) -> None:
+    """Remove portable.flag from the extracted installer payload.
+
+    The published download is the portable ZIP, which legitimately carries
+    portable.flag; normal (non-portable) installations must not inherit it, or
+    the app would store user data beside the exe instead of LocalAppData.
+    """
+    for marker in (source_root / "portable.flag", staging / "portable.flag"):
+        try:
+            if marker.exists():
+                marker.unlink()
+        except OSError:
+            pass
+
+
 def _overlay_tree(
     source: Path,
     target: Path,
@@ -1134,6 +1228,13 @@ class InstallerWorker(QThread):
             if not source_root.exists():
                 source_root = staging
             _installer_log("source_root_resolved", source_root=str(source_root))
+
+            # The published payload is the portable ZIP, which legitimately
+            # contains portable.flag. A normal installation must not receive it:
+            # _resolve_work_root() would then treat a Program Files install as
+            # portable and store/migrate user data into the shared install dir
+            # instead of LocalAppData. Drop the marker before the overlay.
+            _strip_portable_marker(source_root, staging)
 
             preserved_names = {"merged_runtime", "backups", "logs", "uninstall_zaprethub.exe"}
             if self.preserve_data:

@@ -4,8 +4,8 @@ import hashlib
 import multiprocessing
 import os
 import sys
-import threading
 import tempfile
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -385,12 +385,59 @@ def run(argv: list[str] | None = None) -> int:
                 if getattr(window, "_force_exit", False):
                     return
                 try:
-                    if context.backend is not None:
-                        context.backend.request_shutdown_background()
-                    else:
-                        threading.Thread(target=context.processes.stop_all, daemon=True).start()
-                except Exception:
-                    pass
+                    _start_bounded_direct_cleanup(context, stop_backend=context.backend is not None)
+                except Exception as error:
+                    try:
+                        context.logging.log("error", "Application aboutToQuit cleanup failed", error=str(error))
+                    except Exception:
+                        pass
+
+            def _start_bounded_direct_cleanup(context, *, stop_backend: bool = False) -> None:
+                """Stop owned managers off the GUI thread with a force-exit watchdog.
+
+                Qt can initiate shutdown outside _exit_from_tray (e.g. Windows
+                logoff or backend initialization failure). Both ProcessManager
+                shutdowns can run _run_quiet() subprocesses (sc, taskkill, ...)
+                without timeouts, so keep them off the GUI thread and enforce a
+                hard deadline for the whole cleanup.
+                """
+
+                stop_cleanup_done = threading.Event()
+
+                def _bounded_stop() -> None:
+                    try:
+                        context.processes.stop_all()
+                        if stop_backend and context.backend is not None:
+                            if not context.backend.stop(timeout=15.0):
+                                raise RuntimeError(
+                                    getattr(context.backend, "last_stop_error", "")
+                                    or "backend worker cleanup did not complete"
+                                )
+                    except Exception as error:
+                        try:
+                            context.logging.log("error", "Application aboutToQuit cleanup failed", error=str(error))
+                        except Exception:
+                            pass
+                    finally:
+                        stop_cleanup_done.set()
+
+                stop_thread = threading.Thread(target=_bounded_stop, name="zapret-hub-abouttoquit-cleanup", daemon=False)
+                stop_thread.start()
+
+                def _force_exit_if_stalled() -> None:
+                    if stop_cleanup_done.is_set() and not stop_thread.is_alive():
+                        return
+                    try:
+                        context.logging.log("error", "Application aboutToQuit cleanup stalled", reason="cleanup exceeded deadline; forcing exit")
+                    except Exception:
+                        pass
+                    os._exit(0)
+
+                # Must work even after the Qt event loop has wound down; a plain
+                # threading.Timer is independent of Qt timers.
+                force_exit_timer = threading.Timer(30.0, _force_exit_if_stalled)
+                force_exit_timer.daemon = True
+                force_exit_timer.start()
 
             app.aboutToQuit.connect(_cleanup_before_quit)
             if known.autostart_launch and settings.auto_run_components:

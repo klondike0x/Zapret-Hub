@@ -769,21 +769,9 @@ class WebBridge(QObject):
                         pass
                 backend = getattr(self.context, "backend", None)
                 if backend is not None:
-                    try:
-                        backend.request_shutdown_background()
-                    except Exception:
-                        pass
-                    try:
-                        process = getattr(backend, "_process", None)
-                        if process is not None and process.is_alive():
-                            process.join(timeout=1.5)
-                            if process.is_alive():
-                                process.terminate()
-                                process.join(timeout=1.0)
-                            if process.is_alive():
-                                process.kill()
-                    except Exception:
-                        pass
+                    if not backend.stop(timeout=15.0):
+                        reason = getattr(backend, "last_stop_error", "") or "backend or WinDivert cleanup did not complete"
+                        raise RuntimeError(reason)
                 self.context.updates.launch_update(prepared)
                 self._schedule_on_gui(self._quit_for_app_update)
             except Exception as error:
@@ -3671,7 +3659,7 @@ class WebBridge(QObject):
 
 
 class WebMainWindow(QMainWindow):
-    shutdown_finished = Signal()
+    shutdown_finished = Signal(bool, str)
 
     def __init__(
         self,
@@ -4001,7 +3989,7 @@ class WebMainWindow(QMainWindow):
 
         payload = {
             "currentVersion": str(__version__),
-            "latestVersion": "3.0.2",
+            "latestVersion": "3.0.3",
             "changelog": (
                 "• Улучшения интерфейса быстрого доступа\n"
                 "• Исправления стабильности переключения страниц\n"
@@ -4228,8 +4216,7 @@ class WebMainWindow(QMainWindow):
 
     def fade_close(self) -> None:
         if self._force_exit:
-            # Previous quit got stuck — hard-kill the process.
-            os._exit(0)
+            return
         # Closing the window stops config selection only while it is running.
         # Only minimize keeps selection running in the background.
         bridge = self.bridge
@@ -4502,7 +4489,7 @@ class WebMainWindow(QMainWindow):
 
     def _exit_from_tray(self, *, reason: str = "requested") -> None:
         if self._force_exit:
-            os._exit(0)
+            return
         try:
             if self.context is not None:
                 self.context.logging.log("warning", "Application exit requested", reason=reason)
@@ -4514,8 +4501,11 @@ class WebMainWindow(QMainWindow):
         self._dismantle_ui_immediately()
 
         context = self.context
+        shutdown_done = threading.Event()
 
         def shutdown() -> None:
+            success = True
+            failure_reason = ""
             try:
                 bridge = getattr(self, "bridge", None)
                 presence = getattr(bridge, "_discord_presence", None) if bridge is not None else None
@@ -4524,36 +4514,69 @@ class WebMainWindow(QMainWindow):
                         presence.stop()
                     except Exception:
                         pass
-                if context is None:
-                    return
-                if context.backend is not None:
+                if context is not None:
+                    # Components are launched by the GUI-owned ProcessManager.
+                    # The backend worker has a separate ProcessManager and does
+                    # not own the GUI's WinDivert service state.
+                    gui_ok = True
+                    gui_reason = ""
                     try:
-                        context.backend.request_shutdown_background()
-                    except Exception:
-                        pass
-                    try:
-                        process = getattr(context.backend, "_process", None)
-                        if process is not None and process.is_alive():
-                            process.terminate()
-                            process.join(timeout=1.5)
-                            if process.is_alive():
-                                process.kill()
-                    except Exception:
-                        pass
-                else:
-                    context.processes.stop_all()
-            except Exception:
-                pass
+                        context.processes.stop_all()
+                        gui_result = context.processes.last_shutdown_result
+                        gui_ok = bool(gui_result.get("ok", False))
+                        gui_reason = str(gui_result.get("reason", "") or "")
+                    except Exception as error:
+                        gui_ok = False
+                        gui_reason = str(error)
+                    backend_ok = True
+                    backend_reason = ""
+                    if context.backend is not None:
+                        backend_ok = bool(context.backend.stop(timeout=15.0))
+                        if not backend_ok:
+                            backend_reason = getattr(context.backend, "last_stop_error", "") or "backend worker cleanup did not complete"
+                    success = bool(gui_ok and backend_ok)
+                    failure_reason = "; ".join(item for item in (gui_reason, backend_reason) if item)
+            except Exception as error:
+                success = False
+                failure_reason = str(error)
+                try:
+                    if context is not None:
+                        context.logging.log("error", "Application shutdown failed", error=failure_reason)
+                except Exception:
+                    pass
+            try:
+                self.shutdown_finished.emit(success, failure_reason)
+            finally:
+                shutdown_done.set()
 
-        # Daemon: do not keep the process alive if stop hangs (e.g. diagnostics).
-        threading.Thread(target=shutdown, daemon=True, name="zapret-hub-shutdown").start()
+        # Wait for child processes and the owned WinDivert service before Qt exits.
+        shutdown_thread = threading.Thread(target=shutdown, daemon=False, name="zapret-hub-shutdown")
+        shutdown_thread.start()
+
         app = QApplication.instance()
-        if app is not None:
-            QTimer.singleShot(0, app.quit)
-            # Hard deadline if Qt / WebEngine / backend refuse to leave.
-            QTimer.singleShot(2500, lambda: os._exit(0))
-        else:
+        if app is None:
             os._exit(0)
+        # Cleanup runs _run_quiet() subprocesses (sc / taskkill / ...) with no
+        # timeout, so the graceful path above could hang forever in the direct
+        # stop_all() branch (backend not attached yet) or on a stalled helper.
+        # Keep the graceful wait, but retain a bounded fallback: force exit if
+        # shutdown still has not finished when this watchdog fires.
+        self._shutdown_watchdog = QTimer(self)
+        self._shutdown_watchdog.setSingleShot(True)
+        self._shutdown_watchdog.timeout.connect(
+            lambda: self._force_exit_on_stalled_shutdown(shutdown_done, shutdown_thread)
+        )
+        self._shutdown_watchdog.start(30000)
+
+    def _force_exit_on_stalled_shutdown(self, shutdown_done: threading.Event, shutdown_thread: threading.Thread) -> None:
+        if shutdown_done.is_set() and not shutdown_thread.is_alive():
+            return
+        try:
+            if self.context is not None:
+                self.context.logging.log("error", "Application shutdown stalled", reason="cleanup exceeded deadline; forcing exit")
+        except Exception:
+            pass
+        os._exit(0)
 
     def _dismantle_ui_immediately(self) -> None:
         """Hide window and tray icon right away — do not wait for backend stop."""
@@ -4590,8 +4613,27 @@ class WebMainWindow(QMainWindow):
                 pass
             self._tray_menu = None  # type: ignore[assignment]
 
-    @Slot()
-    def _finish_exit_after_shutdown(self) -> None:
+    @Slot(bool, str)
+    def _finish_exit_after_shutdown(self, success: bool = True, reason: str = "") -> None:
+        if not success:
+            try:
+                if self.context is not None:
+                    self.context.logging.log(
+                        "error",
+                        "Shutdown fallback notification shown",
+                        reason=reason or "unknown cleanup failure",
+                    )
+            except Exception:
+                pass
+            QMessageBox.warning(
+                None,
+                "Zapret Hub",
+                (
+                    "\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c \u043f\u043e\u043b\u043d\u043e\u0441\u0442\u044c\u044e \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u0438\u0442\u044c \u0441\u0435\u0442\u0435\u0432\u043e\u0439 \u043a\u043e\u043c\u043f\u043e\u043d\u0435\u043d\u0442 \u0438 \u0434\u0440\u0430\u0439\u0432\u0435\u0440 WinDivert. "
+                    "\u0427\u0430\u0441\u0442\u044c \u0444\u0430\u0439\u043b\u043e\u0432 \u043c\u043e\u0436\u0435\u0442 \u043e\u0441\u0442\u0430\u0432\u0430\u0442\u044c\u0441\u044f \u0437\u0430\u043d\u044f\u0442\u043e\u0439 \u0434\u043e \u043f\u0435\u0440\u0435\u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0438 Windows.\n\n"
+                    f"\u041f\u0440\u0438\u0447\u0438\u043d\u0430: {reason or 'неизвестная ошибка'}"
+                ),
+            )
         app = QApplication.instance()
         if app is not None:
             app.quit()

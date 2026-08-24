@@ -52,7 +52,7 @@ export function ComponentUpdatesModal({
           </div>
           <footer className="flex justify-end gap-2 border-t border-line-1 px-4 py-3">
             <button type="button" onClick={onClose} className="rounded-lg border border-line-1 bg-bg-1 px-3 py-1.5 text-[11px] text-fg-dim hover:bg-bg-3 hover:text-fg">{ru ? "Пропустить" : "Skip"}</button>
-            <button type="button" onClick={updateAll} className="rounded-lg bg-[rgb(var(--page-accent-rgb))] px-3 py-1.5 text-[11px] font-medium text-white">{ru ? "Обновить всё" : "Update all"}</button>
+            <button type="button" onClick={updateAll} className="rounded-lg bg-accent px-3 py-1.5 text-[11px] font-semibold text-accent-foreground shadow-sm hover:brightness-110">{ru ? "Обновить всё" : "Update all"}</button>
           </footer>
         </motion.div>
       </motion.div>

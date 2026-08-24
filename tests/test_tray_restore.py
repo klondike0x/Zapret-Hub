@@ -26,6 +26,21 @@ class TrayRestoreTests(unittest.TestCase):
         self.assertIn("requestAnimationFrame", helper)
         self.assertIn("QTimer.singleShot(80, _refresh_compositor)", helper)
 
+    def test_exit_from_tray_keeps_a_bounded_shutdown_deadline(self) -> None:
+        source = WINDOW_SOURCE.read_text(encoding="utf-8")
+        exit_fn = source.split("    def _exit_from_tray", 1)[1].split("    def _dismantle_ui_immediately", 1)[0]
+        force_exit_fn = source.split("    def _force_exit_on_stalled_shutdown", 1)[1].split("    def _dismantle_ui_immediately", 1)[0]
+
+        # Graceful cleanup is preserved (non-daemon wait for WinDivert/backend).
+        self.assertIn("threading.Thread(target=shutdown, daemon=False", exit_fn)
+        self.assertIn("context.processes.stop_all()", exit_fn)
+        self.assertLess(exit_fn.index("context.processes.stop_all()"), exit_fn.index("context.backend.stop"))
+        self.assertIn('name="zapret-hub-shutdown"', exit_fn)
+        # ...but a hang in untimed cleanup subprocesses must not strand the app.
+        self.assertIn("self._shutdown_watchdog = QTimer(self)", exit_fn)
+        self.assertIn("os._exit(0)", force_exit_fn)
+        self.assertIn("shutdown_done.is_set()", force_exit_fn)
+
 
 if __name__ == "__main__":
     unittest.main()

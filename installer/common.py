@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import ctypes
 import locale
+import json
 import os
 import shutil
 import subprocess
@@ -32,7 +33,31 @@ def _is_ru() -> bool:
 
 RU = _is_ru()
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\ZapretHub"
-INSTALLER_VERSION = "3.0.2"
+
+
+def _load_installer_version() -> str:
+    roots: list[Path] = []
+    try:
+        roots.append(Path(__file__).resolve().parents[1])
+    except Exception:
+        pass
+    try:
+        roots.append(Path(sys.executable).resolve().parent)
+    except Exception:
+        pass
+    for root in roots:
+        manifest = root / "installer_version.json"
+        try:
+            payload = json.loads(manifest.read_text(encoding="utf-8-sig"))
+            version = str(payload.get("version") or "").strip()
+            if version:
+                return version
+        except Exception:
+            continue
+    return "3.0.3"
+
+
+INSTALLER_VERSION = _load_installer_version()
 INSTALLER_LOG_PATH = Path(tempfile.gettempdir()) / "zapret_hub_installer.log"
 UNINSTALLER_LOG_PATH = Path(tempfile.gettempdir()) / "zapret_hub_uninstaller.log"
 
@@ -258,6 +283,11 @@ def looks_like_zapret_hub_dir(path: Path) -> bool:
     return any((path / name).exists() for name in ("zapret_hub.exe", "Zapret_Hub.exe", "uninstall_zaprethub.exe"))
 
 
+def _is_normal_install_location(path: Path) -> bool:
+    """Return whether a registry path belongs to a normal installed copy."""
+    return path.exists() and not (path / "portable.flag").is_file()
+
+
 def install_dir_from_registry() -> Path | None:
     if not sys.platform.startswith("win"):
         return None
@@ -269,7 +299,7 @@ def install_dir_from_registry() -> Path | None:
             with winreg.OpenKey(root, UNINSTALL_KEY, 0, access) as key:
                 value, _ = winreg.QueryValueEx(key, "InstallLocation")
                 path = Path(str(value))
-                if path.exists():
+                if _is_normal_install_location(path):
                     return path
         except Exception:
             continue
@@ -279,6 +309,12 @@ def install_dir_from_registry() -> Path | None:
 def resolve_install_dir(explicit: Path | None = None) -> Path:
     if explicit is not None:
         return explicit
+    # A portable uninstaller runs from the portable directory itself. Prefer
+    # that marker before the shared registry, which may point to a normal install.
+    if getattr(sys, "frozen", False):
+        portable = Path(sys.executable).resolve().parent
+        if (portable / "portable.flag").is_file() and looks_like_zapret_hub_dir(portable):
+            return portable
     from_registry = install_dir_from_registry()
     if from_registry is not None:
         return from_registry
@@ -287,7 +323,6 @@ def resolve_install_dir(explicit: Path | None = None) -> Path:
         if looks_like_zapret_hub_dir(portable):
             return portable
     return default_install_dir()
-
 
 def _run_hidden(command: list[str]) -> None:
     startup = None
@@ -363,7 +398,7 @@ def _process_path_under_root(executable_path: str, root: Path) -> bool:
             return False
 
 
-def terminate_running_instances(install_dir: Path | None = None) -> None:
+def terminate_running_instances(install_dir: Path | None = None, *, portable_install: bool | None = None) -> None:
     """Stop only processes whose executable lives under the target install directory.
 
     Never kill Zapret_Hub.exe (or helpers) by image name alone — a portable copy
@@ -380,10 +415,13 @@ def terminate_running_instances(install_dir: Path | None = None) -> None:
     if not str(target_root).strip():
         return
 
-    _remove_autostart_entries()
-    # Service name is shared by Zapret Hub installs; only touch it when we have a real target.
-    _run_hidden(["sc", "stop", "zapret"])
-    _run_hidden(["sc", "delete", "zapret"])
+    portable_target = ((target_root / "portable.flag").is_file() if portable_install is None else bool(portable_install))
+    if not portable_target:
+        # These actions are machine/global state. A portable copy must not
+        # remove the normal installation's Run entry or shared Zapret service.
+        _remove_autostart_entries()
+        _run_hidden(["sc", "stop", "zapret"])
+        _run_hidden(["sc", "delete", "zapret"])
 
     root_literal = str(target_root).replace("'", "''")
     current_pid = os.getpid()
@@ -465,7 +503,7 @@ def quarantine_item(path: Path) -> bool:
         return False
 
 
-def safe_remove_item(path: Path, install_dir: Path | None = None) -> None:
+def safe_remove_item(path: Path, install_dir: Path | None = None, *, portable_install: bool | None = None) -> None:
     for _ in range(6):
         try:
             if not path.exists():
@@ -477,7 +515,7 @@ def safe_remove_item(path: Path, install_dir: Path | None = None) -> None:
                 path.unlink()
             return
         except PermissionError:
-            terminate_running_instances(install_dir or path.parent)
+            terminate_running_instances(install_dir or path.parent, portable_install=portable_install)
             time.sleep(0.45)
         except Exception:
             if path.is_dir():
@@ -488,15 +526,17 @@ def safe_remove_item(path: Path, install_dir: Path | None = None) -> None:
         raise PermissionError(f"cannot replace: {path}")
 
 
-def wipe_install_dir(install_dir: Path) -> None:
+def wipe_install_dir(install_dir: Path, *, portable_install: bool | None = None) -> None:
     if not install_dir.exists():
         return
     ignored_leftovers = {"merged_runtime", "backups", "logs"}
+    if portable_install is None:
+        portable_install = (install_dir / "portable.flag").is_file()
     for _ in range(6):
-        terminate_running_instances(install_dir)
+        terminate_running_instances(install_dir, portable_install=portable_install)
         for item in list(install_dir.iterdir()):
             try:
-                safe_remove_item(item, install_dir)
+                safe_remove_item(item, install_dir, portable_install=portable_install)
             except Exception:
                 if item.name in ignored_leftovers:
                     if quarantine_item(item):
@@ -515,6 +555,11 @@ def wipe_install_dir(install_dir: Path) -> None:
 
 
 def user_data_dirs(install_dir: Path | None = None) -> list[Path]:
+    # A portable uninstaller must never remove the shared LocalAppData state
+    # belonging to a separate normal installation on the same machine.
+    if install_dir is not None and (install_dir / "portable.flag").is_file():
+        return [install_dir / "user_data"]
+
     roots: list[Path] = []
     explicit = str(os.environ.get("ZAPRET_HUB_WORK_ROOT", "") or "").strip()
     if explicit:
@@ -549,7 +594,14 @@ def remove_app_data(install_dir: Path | None = None) -> None:
             quarantine_item(path)
 
 
-def remove_uninstall_registry() -> None:
+def _registry_entry_belongs_to(install_dir: Path, registered_location: str | None) -> bool:
+    location = str(registered_location or "").strip()
+    if not location:
+        return False
+    return _normalized_path_text(install_dir) == _normalized_path_text(Path(location))
+
+
+def remove_uninstall_registry(install_dir: Path | None = None) -> None:
     if not sys.platform.startswith("win"):
         return
     for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
@@ -557,10 +609,17 @@ def remove_uninstall_registry() -> None:
             access = winreg.KEY_WRITE
             if root == winreg.HKEY_LOCAL_MACHINE:
                 access |= winreg.KEY_WOW64_64KEY
+            if install_dir is not None:
+                read_access = winreg.KEY_READ
+                if root == winreg.HKEY_LOCAL_MACHINE:
+                    read_access |= winreg.KEY_WOW64_64KEY
+                with winreg.OpenKey(root, UNINSTALL_KEY, 0, read_access) as key:
+                    registered_location, _ = winreg.QueryValueEx(key, "InstallLocation")
+                if not _registry_entry_belongs_to(install_dir, str(registered_location)):
+                    continue
             winreg.DeleteKeyEx(root, UNINSTALL_KEY, access=access, reserved=0)
         except Exception:
             continue
-
 
 def launch_folder_removal(install_dir: Path) -> None:
     """Delete the installation directory after the uninstaller exits."""
@@ -738,19 +797,27 @@ def perform_uninstall(install_dir: Path, progress_cb=None) -> None:
         except Exception:
             return
 
-    uninstaller_log("uninstall_start", target=str(install_dir))
+    portable_install = (install_dir / "portable.flag").is_file()
+    uninstaller_log("uninstall_start", target=str(install_dir), portable=portable_install)
     report(10, tr("Остановка процессов...", "Stopping processes..."))
-    terminate_running_instances(install_dir)
-    report(28, tr("Удаление ярлыков...", "Removing shortcuts..."))
-    remove_shortcuts()
+    terminate_running_instances(install_dir, portable_install=portable_install)
+    if portable_install:
+        report(28, tr("Ярлыки обычной установки сохранены.", "Normal-install shortcuts preserved."))
+    else:
+        report(28, tr("Удаление ярлыков...", "Removing shortcuts..."))
+        remove_shortcuts()
     report(46, tr("Удаление пользовательских данных...", "Removing user data..."))
     remove_app_data(install_dir)
-    report(68, tr("Удаление записи в Параметрах Windows...", "Removing Windows Apps entry..."))
-    remove_uninstall_registry()
+    if portable_install:
+        report(68, tr("Удаление регистрации portable-копии...", "Removing portable registration..."))
+        remove_uninstall_registry(install_dir)
+    else:
+        report(68, tr("Удаление записи в Параметрах Windows...", "Removing Windows Apps entry..."))
+        remove_uninstall_registry()
     report(84, tr("Удаление файлов приложения...", "Removing application files..."))
     if install_dir.exists():
         try:
-            wipe_install_dir(install_dir)
+            wipe_install_dir(install_dir, portable_install=portable_install)
         except Exception:
             launch_folder_removal(install_dir)
         else:

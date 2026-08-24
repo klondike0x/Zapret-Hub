@@ -850,3 +850,116 @@ def test_tuner_discord_seed_batches_catalog():
     # Soft HTTPS miss: lists/services only — no GameFilter / strategy thrash.
     assert not any(step.kind == "game_filter" for step in steps)
     assert not any(step.kind == "general" for step in steps)
+
+
+def test_configured_site_probes_are_bounded_and_fair(tmp_path: Path, monkeypatch):
+    from zapret_hub.services.orchestrator import engine as engine_module
+
+    engine = engine_module.OrchestratorEngine()
+    settings = SimpleNamespace(selected_service_ids=[])
+    engine.context = SimpleNamespace(
+        settings=SimpleNamespace(get=lambda: settings),
+        paths=SimpleNamespace(configs_dir=tmp_path, install_root=tmp_path),
+        knowledge=None,
+        logging=None,
+    )
+    sites = [SimpleNamespace(id="site", domains=tuple(f"site-{i}.example" for i in range(5)))]
+    monkeypatch.setattr(engine_module.AutoSiteCatalog, "load", lambda *args, **kwargs: sites)
+    calls: list[tuple[str, float]] = []
+    engine._signals = SimpleNamespace(
+        probe_host_access=lambda domain, timeout_s: (
+            calls.append((domain, timeout_s)) or ProbeResult(ok=True, target=domain, latency_ms=1)
+        )
+    )
+    learner = SimpleNamespace(domain_in_merged_lists=lambda *args: False)
+
+    engine._configured_site_incident(settings, learner, [])
+    assert [domain for domain, _ in calls] == ["site-0.example", "site-1.example"]
+    assert len(calls) == 2
+    assert all(0 < timeout <= 2.5 for _, timeout in calls)
+
+    engine._last_site_scan_at = -10_000.0
+    engine._configured_site_incident(settings, learner, [])
+    assert [domain for domain, _ in calls[2:]] == ["site-2.example", "site-3.example"]
+
+
+def test_probe_https_classifies_451_as_block_but_keeps_gateway_4xx_ok(monkeypatch):
+    from urllib.error import HTTPError
+
+    from zapret_hub.services.orchestrator import signals as signals_module
+
+    collector = signals_module.SignalCollector()
+
+    def reject(url, *, code: int):
+        raise HTTPError(url, code, f"HTTP {code}", hdrs=None, fp=None)
+
+    monkeypatch.setattr(
+        signals_module.urllib.request,
+        "urlopen",
+        lambda request, timeout: reject(request.full_url, code=451),
+    )
+    blocked = collector.probe_https("https://rutracker.org", timeout_s=0.1)
+    assert blocked.ok is False
+    assert blocked.error == "http_451"
+    assert blocked.cls == "http_block"
+
+    monkeypatch.setattr(
+        signals_module.urllib.request,
+        "urlopen",
+        lambda request, timeout: reject(request.full_url, code=403),
+    )
+    gateway_response = collector.probe_https("https://example.org", timeout_s=0.1)
+    assert gateway_response.ok is True
+    assert gateway_response.cls == "ok"
+
+def test_probe_host_access_shares_one_deadline(monkeypatch):
+    from zapret_hub.services.orchestrator import signals as signals_module
+
+    collector = signals_module.SignalCollector()
+    now = 100.0
+    calls: list[tuple[str, float]] = []
+
+    def fake_monotonic() -> float:
+        return now
+
+    def fake_tls(host: str, *, timeout_s: float) -> ProbeResult:
+        nonlocal now
+        calls.append(("tls", timeout_s))
+        now += 1.25
+        return ProbeResult(ok=True, target=f"{host}:443", latency_ms=1.0, cls="ok")
+
+    def fake_http(url: str, *, timeout_s: float) -> ProbeResult:
+        calls.append(("http", timeout_s))
+        return ProbeResult(ok=True, target=url, latency_ms=1.0, cls="ok")
+
+    monkeypatch.setattr(signals_module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(collector, "probe_tls", fake_tls)
+    monkeypatch.setattr(collector, "probe_https", fake_http)
+
+    result = collector.probe_host_access("example.org", timeout_s=2.0)
+
+    assert result.ok is True
+    assert [kind for kind, _ in calls] == ["tls", "http"]
+    assert 1.99 <= calls[0][1] <= 2.01
+    assert 0.74 <= calls[1][1] <= 0.76
+
+def test_probe_stage_wrapper_enforces_wall_clock_timeout():
+    import time
+
+    from zapret_hub.services.orchestrator import signals as signals_module
+
+    collector = signals_module.SignalCollector()
+
+    def stalled(*_args, **_kwargs):
+        time.sleep(0.2)
+        return ProbeResult(ok=True, target="example.org", latency_ms=1.0, cls="ok")
+
+    collector._probe_tls_once = stalled
+    tls = collector.probe_tls("example.org", timeout_s=0.02)
+    assert tls.ok is False
+    assert tls.error == "probe_timeout"
+
+    collector._probe_https_once = stalled
+    http = collector.probe_https("https://example.org", timeout_s=0.02)
+    assert http.ok is False
+    assert http.error == "probe_timeout"

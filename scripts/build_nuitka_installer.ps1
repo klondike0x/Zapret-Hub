@@ -2,8 +2,8 @@ param(
     [string]$Python = ".\.venv\Scripts\python.exe",
     [string]$PayloadDir = "installer_payload",
     [string]$OutputDir = "dist_installer",
-    [string]$ReleaseDir = "release_3.0.2",
-    [string]$Version = "3.0.2",
+    [string]$ReleaseDir = "release_3.0.3",
+    [string]$Version = "3.0.3",
     [string]$X64Source = "",
     [string]$Arm64Source = "",
     [string]$UninstallerX64Source = "",
@@ -32,7 +32,7 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 if ([string]::IsNullOrWhiteSpace($Version)) {
-  $Version = "3.0.2"
+  $Version = "3.0.3"
 }
 $versionParts = $Version.Split(".")
 while ($versionParts.Count -lt 4) { $versionParts += "0" }
@@ -203,6 +203,12 @@ if ($payloadZipHits.Count -gt 0) {
 }
 
 $installerName = "install_zaprethub_${Version}_universal.exe"
+$installerVersionManifest = Join-Path $root "installer_version.json"
+$manifestExisted = Test-Path -LiteralPath $installerVersionManifest
+$previousManifest = if ($manifestExisted) { [System.IO.File]::ReadAllText($installerVersionManifest) } else { "" }
+$manifestJson = @{ version = $Version } | ConvertTo-Json -Compress
+[System.IO.File]::WriteAllText($installerVersionManifest, $manifestJson, [System.Text.UTF8Encoding]::new($false))
+
 $nuitkaArgs = @(
   "-m",
   "nuitka"
@@ -225,7 +231,8 @@ $nuitkaArgs = @(
   "--output-filename=$installerName",
   "--include-data-dir=ui_assets=ui_assets",
   "--include-data-dir=installer_web=installer_web",
-  "--include-data-files=docs\legal\ZAPRET_HUB_TERMS_RU.txt=docs\legal\ZAPRET_HUB_TERMS_RU.txt"
+  "--include-data-files=docs\legal\ZAPRET_HUB_TERMS_RU.txt=docs\legal\ZAPRET_HUB_TERMS_RU.txt",
+  "--include-data-files=installer_version.json=installer_version.json"
 ) + $installerDataFiles + @(
   "--include-package=installer",
   "--nofollow-import-to=tkinter",
@@ -241,8 +248,18 @@ if ($embedBundledUninstaller) {
 } else {
   Write-Host "Building compressed slim onefile installer (QtWebEngine UI; no portable zips; no embedded uninstaller EXE)..."
 }
-& $Python @nuitkaArgs
-if ($LASTEXITCODE -ne 0) { throw "Nuitka installer build failed with exit code $LASTEXITCODE" }
+$buildExitCode = 0
+try {
+  & $Python @nuitkaArgs
+  $buildExitCode = $LASTEXITCODE
+} finally {
+  if ($manifestExisted) {
+    [System.IO.File]::WriteAllText($installerVersionManifest, $previousManifest, [System.Text.UTF8Encoding]::new($false))
+  } elseif (Test-Path -LiteralPath $installerVersionManifest) {
+    Remove-Item -LiteralPath $installerVersionManifest -Force
+  }
+}
+if ($buildExitCode -ne 0) { throw "Nuitka installer build failed with exit code $buildExitCode" }
 
 $builtInstaller = Get-ChildItem $OutputDir -Recurse -File -Filter $installerName |
     Select-Object -First 1

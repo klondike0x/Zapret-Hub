@@ -528,3 +528,56 @@ def test_auto_resume_restarts_zapret_with_rebuilt_services(tmp_path: Path) -> No
     assert values.selected_service_ids == ["discord", "youtube"]
     # Resume rebuilds snapshot then soft-starts (no hard stop when seamless API absent).
     assert events[-3:] == ["snapshot", "start:zapret", "cutover"]
+
+def test_tg_proxy_stop_waits_for_owned_process_and_invalidates_port_cache() -> None:
+    manager = ProcessManager.__new__(ProcessManager)
+    manager.settings = SimpleNamespace(
+        get=lambda: SimpleNamespace(tg_proxy_host="127.0.0.1", tg_proxy_port=41234)
+    )
+    manager.logging = FakeLogging()
+    manager._processes = {}
+    manager._states = {"tg-ws-proxy": SimpleNamespace(status="running", pid=4321, last_error="")}
+    manager._port_listening_cache = {("127.0.0.1", 41234): (0.0, True)}
+    manager._image_running_cache = {}
+    manager._process_lock = threading.RLock()
+    events: list[str] = []
+
+    class FakeProcess:
+        pid = 4321
+
+        def __init__(self) -> None:
+            self.terminated = False
+            self.killed = False
+
+        def poll(self):
+            return 0 if self.terminated or self.killed else None
+
+        def terminate(self) -> None:
+            self.terminated = True
+            events.append("terminate")
+
+        def wait(self, timeout: float):
+            events.append(f"wait:{timeout}")
+            return 0
+
+        def kill(self) -> None:
+            self.killed = True
+            events.append("kill")
+
+    process = FakeProcess()
+    manager._processes["tg-ws-proxy"] = process
+    manager._run_quiet = lambda *_args, **_kwargs: events.append("taskkill")
+    manager._kill_image = lambda image: events.append(f"image:{image}")
+    manager._close_source_log_stream = lambda source: events.append(f"log:{source}")
+    manager._invalidate_state_cache = lambda: None
+    manager._is_port_listening = lambda host, port: (str(host), int(port)) in manager._port_listening_cache
+
+    state = manager._stop_component_unlocked("tg-ws-proxy")
+
+    assert state.status == "stopped"
+    assert process.terminated is True
+    assert process.killed is False
+    assert events[:2] == ["terminate", "wait:4"]
+    assert "image:TgWsProxy_windows.exe" in events
+    assert ("127.0.0.1", 41234) not in manager._port_listening_cache
+    assert "tg-ws-proxy" not in manager._processes
