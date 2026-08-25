@@ -15,25 +15,79 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Git tag or release version (for example v3.0.3)"
+        description: "Git tag or release version (for example v3.0.4)"
         required: true
-        default: "v3.0.3"
+        default: "v3.0.4"
       release_name:
         description: "Release title"
         required: true
-        default: "Zapret Hub 3.0.3"
+        default: "Zapret Hub 3.0.4"
       changelog:
         description: "Release changelog (optional; otherwise .github/release-notes/$version.md)"
         required: false
         default: ""
 
 jobs:
+  resolve_release:
+    name: Resolve and verify release tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      commit: ${{ steps.resolve.outputs.commit }}
+      version: ${{ steps.resolve.outputs.version }}
+      name: ${{ steps.resolve.outputs.name }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Resolve and verify requested tag
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_RELEASE_NAME: ${{ inputs.release_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          tag="$REF_NAME"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then tag="$INPUT_TAG"; fi
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Expected a version tag such as v3.0.4, got: $tag" >&2; exit 1; }
+          git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+          git cat-file -e "$tag^{tag}" || { echo "Release tag must be an annotated tag: $tag" >&2; exit 1; }
+          commit="$(git rev-parse "$tag^{commit}")"
+          git show "${tag}:release-signing-key.asc" | gpg --batch --import
+          git verify-tag "$tag"
+          git merge-base --is-ancestor "$commit" "origin/$DEFAULT_BRANCH"
+          version="${tag#v}"
+          name="$INPUT_RELEASE_NAME"
+          if [ -z "$name" ]; then name="Zapret Hub $version"; fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
   portable-x64:
+    needs: resolve_release
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ needs.resolve_release.outputs.commit }}
+          fetch-depth: 0
+      - name: Verify checked out release commit
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ needs.resolve_release.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual_commit="$(git rev-parse HEAD)"
+          test "$actual_commit" = "$EXPECTED_COMMIT" || {
+            echo "Checked out commit $actual_commit does not match expected release commit $EXPECTED_COMMIT." >&2
+            exit 1
+          }
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -57,7 +111,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ inputs.tag || github.ref_name }}"
-          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.3" }
+          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.4" }
           $version = $tag.TrimStart("v")
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
@@ -111,6 +165,7 @@ jobs:
           if-no-files-found: error
 
   portable-arm64:
+    needs: resolve_release
     # Do not publish an ARM64 build until every bundled WinDivert-dependent
     # runtime is native ARM64. An ARM UI paired with x64 drivers is misleading.
     if: ${{ false }}
@@ -118,7 +173,19 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ needs.resolve_release.outputs.commit }}
+          fetch-depth: 0
+      - name: Verify checked out release commit
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ needs.resolve_release.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual_commit="$(git rev-parse HEAD)"
+          test "$actual_commit" = "$EXPECTED_COMMIT" || {
+            echo "Checked out commit $actual_commit does not match expected release commit $EXPECTED_COMMIT." >&2
+            exit 1
+          }
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -142,7 +209,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ inputs.tag || github.ref_name }}"
-          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.3" }
+          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.4" }
           $version = $tag.TrimStart("v")
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
@@ -196,11 +263,24 @@ jobs:
           if-no-files-found: error
 
   installer:
+    needs: resolve_release
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ needs.resolve_release.outputs.commit }}
+          fetch-depth: 0
+      - name: Verify checked out release commit
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ needs.resolve_release.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual_commit="$(git rev-parse HEAD)"
+          test "$actual_commit" = "$EXPECTED_COMMIT" || {
+            echo "Checked out commit $actual_commit does not match expected release commit $EXPECTED_COMMIT." >&2
+            exit 1
+          }
       - name: Clean leftover payload dirs
         shell: pwsh
         run: |
@@ -229,7 +309,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ inputs.tag || github.ref_name }}"
-          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.3" }
+          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.4" }
           $version = $tag.TrimStart("v")
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
@@ -290,23 +370,37 @@ jobs:
     needs:
       - portable-x64
       - installer
+      - resolve_release
     runs-on: windows-latest
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ needs.resolve_release.outputs.commit }}
+          fetch-depth: 0
+      - name: Verify checked out release commit
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ needs.resolve_release.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual_commit="$(git rev-parse HEAD)"
+          test "$actual_commit" = "$EXPECTED_COMMIT" || {
+            echo "Checked out commit $actual_commit does not match expected release commit $EXPECTED_COMMIT." >&2
+            exit 1
+          }
       - name: Resolve release metadata
         id: release_meta
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.resolve_release.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.resolve_release.outputs.version }}
+          RELEASE_NAME: ${{ needs.resolve_release.outputs.name }}
         run: |
-          $tag = "${{ inputs.tag || github.ref_name }}"
-          if (-not $tag) { $tag = "v3.0.3" }
-          if ($tag -notmatch '^v\d+\.\d+\.\d+$') { throw "Expected a version tag such as v3.0.4, got: $tag" }
-          $version = $tag.TrimStart("v")
-          $name = "${{ inputs.release_name }}"
-          if (-not $name) { $name = "Zapret Hub $version" }
+          $tag = $env:RELEASE_TAG
+          $version = $env:RELEASE_VERSION
+          $name = $env:RELEASE_NAME
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
           "name=$name" >> $env:GITHUB_OUTPUT
@@ -383,7 +477,7 @@ jobs:
 
   publish:
     name: Sign and publish immutable release
-    needs: package-release
+    needs: [package-release, resolve_release]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -393,33 +487,51 @@ jobs:
       - name: Checkout signed release tag
         uses: actions/checkout@v5
         with:
-          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          ref: ${{ needs.resolve_release.outputs.commit }}
           fetch-depth: 0
+      - name: Verify checked out release commit
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ needs.resolve_release.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual_commit="$(git rev-parse HEAD)"
+          test "$actual_commit" = "$EXPECTED_COMMIT" || {
+            echo "Checked out commit $actual_commit does not match expected release commit $EXPECTED_COMMIT." >&2
+            exit 1
+          }
 
       - name: Resolve and verify release tag
         id: release_meta
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          REF_NAME: ${{ github.ref_name }}
-          INPUT_TAG: ${{ inputs.tag }}
-          INPUT_RELEASE_NAME: ${{ inputs.release_name }}
+          EXPECTED_TAG: ${{ needs.resolve_release.outputs.tag }}
+          EXPECTED_COMMIT: ${{ needs.resolve_release.outputs.commit }}
+          EXPECTED_NAME: ${{ needs.resolve_release.outputs.name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          tag="$REF_NAME"
-          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then tag="$INPUT_TAG"; fi
-          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Expected a version tag such as v3.0.4, got: $tag" >&2; exit 1; }
+          tag="$EXPECTED_TAG"
+          expected_commit="$EXPECTED_COMMIT"
           git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
           git cat-file -e "$tag^{tag}" || { echo "Release tag must be an annotated tag: $tag" >&2; exit 1; }
-          gpg --batch --import release-signing-key.asc
+          actual_commit="$(git rev-parse "$tag^{commit}")"
+          test "$actual_commit" = "$expected_commit" || {
+            echo "Release tag $tag now points to $actual_commit instead of resolved commit $expected_commit." >&2
+            exit 1
+          }
+          test "$(git rev-parse HEAD)" = "$expected_commit" || {
+            echo "Publish job checked out a different commit than the resolved release commit." >&2
+            exit 1
+          }
+          git show "${tag}:release-signing-key.asc" | gpg --batch --import
           git verify-tag "$tag"
-          git merge-base --is-ancestor "$tag^{commit}" "origin/${{ github.event.repository.default_branch }}"
+          git merge-base --is-ancestor "$actual_commit" "origin/$DEFAULT_BRANCH"
           version="${tag#v}"
-          name="$INPUT_RELEASE_NAME"
+          name="$EXPECTED_NAME"
           if [ -z "$name" ]; then name="Zapret Hub $version"; fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "name=$name" >> "$GITHUB_OUTPUT"
-
       - name: Download release candidate
         uses: actions/download-artifact@v6
         with:

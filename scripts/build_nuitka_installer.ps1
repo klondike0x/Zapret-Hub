@@ -2,8 +2,8 @@ param(
     [string]$Python = ".\.venv\Scripts\python.exe",
     [string]$PayloadDir = "installer_payload",
     [string]$OutputDir = "dist_installer",
-    [string]$ReleaseDir = "release_3.0.3",
-    [string]$Version = "3.0.3",
+    [string]$ReleaseDir = "release_3.0.4",
+    [string]$Version = "3.0.4",
     [string]$X64Source = "",
     [string]$Arm64Source = "",
     [string]$UninstallerX64Source = "",
@@ -32,7 +32,7 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
 if ([string]::IsNullOrWhiteSpace($Version)) {
-  $Version = "3.0.3"
+  $Version = "3.0.4"
 }
 $versionParts = $Version.Split(".")
 while ($versionParts.Count -lt 4) { $versionParts += "0" }

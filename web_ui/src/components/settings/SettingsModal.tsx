@@ -245,7 +245,7 @@ export function SettingsModal({
           <Section title={L("О приложении", "About the app")}>
             <div className="flex items-center gap-3 rounded-[12px] border border-line-1 bg-bg-1/70 p-3">
               <img src={uiAssetUrl("icons/app.png")} alt="" className="h-11 w-11 shrink-0 object-contain" />
-              <div className="min-w-0 flex-1"><div className="text-[13px] font-semibold text-fg">Zapret Hub</div><div className="text-[10px] text-fg-mute">{L("Ускоритель сетевых компонентов · версия 3.0.3", "Network components manager · version 3.0.3")}</div></div>
+              <div className="min-w-0 flex-1"><div className="text-[13px] font-semibold text-fg">Zapret Hub</div><div className="text-[10px] text-fg-mute">{L("Ускоритель сетевых компонентов · версия 3.0.4", "Network components manager · version 3.0.4")}</div></div>
               <button onClick={() => bridge.call("app.check-updates", undefined)} className="shrink-0 rounded-[10px] border border-line-2 bg-bg-3 px-3 py-2 text-[11px] font-semibold text-fg transition-all hover:brightness-110">{L("Проверить обновления", "Check updates")}</button>
             </div>
           </Section>

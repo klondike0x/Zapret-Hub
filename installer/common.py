@@ -54,7 +54,7 @@ def _load_installer_version() -> str:
                 return version
         except Exception:
             continue
-    return "3.0.3"
+    return "3.0.4"
 
 
 INSTALLER_VERSION = _load_installer_version()

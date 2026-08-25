@@ -2,7 +2,7 @@ param(
     [string]$Python = ".\.venv\Scripts\python.exe",
     [string]$OutputDir = "dist_nuitka",
     [string]$UninstallerSource = "",
-    [string]$Version = "3.0.3",
+    [string]$Version = "3.0.4",
     [ValidateSet("zig", "msvc", "mingw")]
     [string]$Compiler = "msvc"
 )
@@ -156,7 +156,7 @@ if ($UninstallerSource) {
 }
 $uninstallerCandidates += @(
     (Join-Path $root "bundled_uninstaller\uninstall_zaprethub.exe"),
-    (Join-Path $root "dist_installer_3.0.3\uninstall_zaprethub.exe"),
+    (Join-Path $root "dist_installer_3.0.4\uninstall_zaprethub.exe"),
     (Join-Path $root "dist_installer\uninstall_zaprethub.exe")
 )
 $uninstallerCandidates += @(Get-ChildItem -LiteralPath $root -Directory -Filter "dist_installer*" -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.FullName "uninstall_zaprethub.exe" })
