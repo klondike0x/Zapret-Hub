@@ -2956,7 +2956,8 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                     shutil.copy2(src, dest)
                 except OSError:
                     pass
-                break
+                else:
+                    break
 
             # Older/newly downloaded Zapret runtimes may not ship the gaming
             # payload. Keep the command line valid by reusing the standard QUIC
@@ -2970,7 +2971,8 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
                         shutil.copy2(fallback, dest)
                     except OSError:
                         pass
-                    break
+                    else:
+                        break
 
     def _bundle_has_bin_overlay(self, bundle_root: Path) -> bool:
         bin_dir = bundle_root / "bin"
