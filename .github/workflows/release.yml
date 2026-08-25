@@ -15,24 +15,106 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Git tag or release version (for example v3.0.3)"
+        description: "Git tag or release version (for example v3.0.4)"
         required: true
-        default: "v3.0.3"
+        default: "v3.0.4"
       release_name:
         description: "Release title"
         required: true
-        default: "Zapret Hub 3.0.3"
+        default: "Zapret Hub 3.0.4"
       changelog:
         description: "Release changelog (optional; otherwise .github/release-notes/$version.md)"
         required: false
         default: ""
 
 jobs:
+  resolve_release:
+    name: Resolve and verify release tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      commit: ${{ steps.resolve.outputs.commit }}
+      version: ${{ steps.resolve.outputs.version }}
+      name: ${{ steps.resolve.outputs.name }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Resolve and verify requested tag
+        id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_RELEASE_NAME: ${{ inputs.release_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          tag="$REF_NAME"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then tag="$INPUT_TAG"; fi
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Expected a version tag such as v3.0.4, got: $tag" >&2; exit 1; }
+          git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+          git cat-file -e "$tag^{tag}" || { echo "Release tag must be an annotated tag: $tag" >&2; exit 1; }
+          commit="$(git rev-parse "$tag^{commit}")"
+          expected_signer='40015491B3A63D777855FEC08DA82B54BDED31AE'
+          gpg_home="$(mktemp -d)"
+          chmod 700 "$gpg_home"
+          export GNUPGHOME="$gpg_home"
+          trap 'rm -rf "$gpg_home"' EXIT
+          key_file="$gpg_home/release-signing-key.asc"
+          verify_status="$gpg_home/verify.status"
+          git show "${tag}:release-signing-key.asc" > "$key_file"
+          primary_count="$(gpg --batch --with-colons --import-options show-only --import "$key_file" | awk -F: '$1 == "pub" { count++ } END { print count + 0 }')"
+          test "$primary_count" = "1" || {
+            echo "Release signing key must contain exactly one primary key; found $primary_count." >&2
+            exit 1
+          }
+          primary_fingerprint="$(gpg --batch --with-colons --import-options show-only --import "$key_file" | awk -F: '$1 == "pub" { in_primary=1; next } in_primary && $1 == "fpr" { print $10; exit }')"
+          test "$primary_fingerprint" = "$expected_signer" || {
+            echo "Release signing key fingerprint $primary_fingerprint does not match the pinned fingerprint." >&2
+            exit 1
+          }
+          gpg --batch --import "$key_file"
+          if ! git verify-tag --raw "$tag" > "$verify_status" 2>&1; then
+            cat "$verify_status" >&2
+            exit 1
+          fi
+          cat "$verify_status"
+          signer="$(awk '$1 == "[GNUPG:]" && $2 == "VALIDSIG" { print $3; exit }' "$verify_status")"
+          test "$signer" = "$expected_signer" || {
+            echo "Tag signer $signer does not match the pinned fingerprint." >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "$commit" "origin/$DEFAULT_BRANCH"
+          version="${tag#v}"
+          name="$INPUT_RELEASE_NAME"
+          if [ -z "$name" ]; then name="Zapret Hub $version"; fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
   portable-x64:
+    needs: resolve_release
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
-
+        with:
+          ref: ${{ needs.resolve_release.outputs.commit }}
+          fetch-depth: 0
+      - name: Verify checked out release commit
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ needs.resolve_release.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual_commit="$(git rev-parse HEAD)"
+          test "$actual_commit" = "$EXPECTED_COMMIT" || {
+            echo "Checked out commit $actual_commit does not match expected release commit $EXPECTED_COMMIT." >&2
+            exit 1
+          }
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -56,7 +138,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ inputs.tag || github.ref_name }}"
-          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.3" }
+          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.4" }
           $version = $tag.TrimStart("v")
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
@@ -110,13 +192,27 @@ jobs:
           if-no-files-found: error
 
   portable-arm64:
+    needs: resolve_release
     # Do not publish an ARM64 build until every bundled WinDivert-dependent
     # runtime is native ARM64. An ARM UI paired with x64 drivers is misleading.
     if: ${{ false }}
     runs-on: windows-11-arm
     steps:
       - uses: actions/checkout@v5
-
+        with:
+          ref: ${{ needs.resolve_release.outputs.commit }}
+          fetch-depth: 0
+      - name: Verify checked out release commit
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ needs.resolve_release.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual_commit="$(git rev-parse HEAD)"
+          test "$actual_commit" = "$EXPECTED_COMMIT" || {
+            echo "Checked out commit $actual_commit does not match expected release commit $EXPECTED_COMMIT." >&2
+            exit 1
+          }
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
@@ -140,7 +236,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ inputs.tag || github.ref_name }}"
-          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.3" }
+          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.4" }
           $version = $tag.TrimStart("v")
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
@@ -194,10 +290,24 @@ jobs:
           if-no-files-found: error
 
   installer:
+    needs: resolve_release
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
-
+        with:
+          ref: ${{ needs.resolve_release.outputs.commit }}
+          fetch-depth: 0
+      - name: Verify checked out release commit
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ needs.resolve_release.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual_commit="$(git rev-parse HEAD)"
+          test "$actual_commit" = "$EXPECTED_COMMIT" || {
+            echo "Checked out commit $actual_commit does not match expected release commit $EXPECTED_COMMIT." >&2
+            exit 1
+          }
       - name: Clean leftover payload dirs
         shell: pwsh
         run: |
@@ -226,7 +336,7 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ inputs.tag || github.ref_name }}"
-          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.3" }
+          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.4" }
           $version = $tag.TrimStart("v")
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
@@ -283,29 +393,44 @@ jobs:
           path: dist_installer/install_zaprethub_${{ steps.meta.outputs.version }}_universal.exe
           if-no-files-found: error
 
-  publish:
+  package-release:
     needs:
       - portable-x64
       - installer
+      - resolve_release
     runs-on: windows-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@v5
-
+        with:
+          ref: ${{ needs.resolve_release.outputs.commit }}
+          fetch-depth: 0
+      - name: Verify checked out release commit
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ needs.resolve_release.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual_commit="$(git rev-parse HEAD)"
+          test "$actual_commit" = "$EXPECTED_COMMIT" || {
+            echo "Checked out commit $actual_commit does not match expected release commit $EXPECTED_COMMIT." >&2
+            exit 1
+          }
       - name: Resolve release metadata
         id: release_meta
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.resolve_release.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.resolve_release.outputs.version }}
+          RELEASE_NAME: ${{ needs.resolve_release.outputs.name }}
         run: |
-          $tag = "${{ inputs.tag || github.ref_name }}"
-          if (-not $tag -or $tag -notmatch '^v?\d') { $tag = "v3.0.3" }
-          $version = $tag.TrimStart("v")
-          $name = "${{ inputs.release_name }}"
-          if (-not $name) { $name = "Zapret Hub $version" }
+          $tag = $env:RELEASE_TAG
+          $version = $env:RELEASE_VERSION
+          $name = $env:RELEASE_NAME
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
           "name=$name" >> $env:GITHUB_OUTPUT
-
       - name: Download build artifacts
         uses: actions/download-artifact@v6
         with:
@@ -370,75 +495,232 @@ jobs:
             --release-base-url "https://github.com/klondike0x/zapret-hub-continuation/releases/download/$tag" `
             --bundle "$releaseDir\winget-manifests-${version}.zip"
 
-      - name: Read release notes
-        id: release_notes
-        shell: pwsh
+      - name: Upload immutable release candidate
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-candidate
+          path: release_${{ steps.release_meta.outputs.version }}/*
+          if-no-files-found: error
+
+  publish:
+    name: Sign and publish immutable release
+    needs: [package-release, resolve_release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Checkout signed release tag
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve_release.outputs.commit }}
+          fetch-depth: 0
+      - name: Verify checked out release commit
+        shell: bash
         env:
+          EXPECTED_COMMIT: ${{ needs.resolve_release.outputs.commit }}
+        run: |
+          set -euo pipefail
+          actual_commit="$(git rev-parse HEAD)"
+          test "$actual_commit" = "$EXPECTED_COMMIT" || {
+            echo "Checked out commit $actual_commit does not match expected release commit $EXPECTED_COMMIT." >&2
+            exit 1
+          }
+
+      - name: Resolve and verify release tag
+        id: release_meta
+        env:
+          EXPECTED_TAG: ${{ needs.resolve_release.outputs.tag }}
+          EXPECTED_COMMIT: ${{ needs.resolve_release.outputs.commit }}
+          EXPECTED_NAME: ${{ needs.resolve_release.outputs.name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          tag="$EXPECTED_TAG"
+          expected_commit="$EXPECTED_COMMIT"
+          git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
+          git cat-file -e "$tag^{tag}" || { echo "Release tag must be an annotated tag: $tag" >&2; exit 1; }
+          actual_commit="$(git rev-parse "$tag^{commit}")"
+          test "$actual_commit" = "$expected_commit" || {
+            echo "Release tag $tag now points to $actual_commit instead of resolved commit $expected_commit." >&2
+            exit 1
+          }
+          test "$(git rev-parse HEAD)" = "$expected_commit" || {
+            echo "Publish job checked out a different commit than the resolved release commit." >&2
+            exit 1
+          }
+          expected_signer='40015491B3A63D777855FEC08DA82B54BDED31AE'
+          gpg_home="$(mktemp -d)"
+          chmod 700 "$gpg_home"
+          export GNUPGHOME="$gpg_home"
+          trap 'rm -rf "$gpg_home"' EXIT
+          key_file="$gpg_home/release-signing-key.asc"
+          verify_status="$gpg_home/verify.status"
+          git show "${tag}:release-signing-key.asc" > "$key_file"
+          primary_count="$(gpg --batch --with-colons --import-options show-only --import "$key_file" | awk -F: '$1 == "pub" { count++ } END { print count + 0 }')"
+          test "$primary_count" = "1" || {
+            echo "Release signing key must contain exactly one primary key; found $primary_count." >&2
+            exit 1
+          }
+          primary_fingerprint="$(gpg --batch --with-colons --import-options show-only --import "$key_file" | awk -F: '$1 == "pub" { in_primary=1; next } in_primary && $1 == "fpr" { print $10; exit }')"
+          test "$primary_fingerprint" = "$expected_signer" || {
+            echo "Release signing key fingerprint $primary_fingerprint does not match the pinned fingerprint." >&2
+            exit 1
+          }
+          gpg --batch --import "$key_file"
+          if ! git verify-tag --raw "$tag" > "$verify_status" 2>&1; then
+            cat "$verify_status" >&2
+            exit 1
+          fi
+          cat "$verify_status"
+          signer="$(awk '$1 == "[GNUPG:]" && $2 == "VALIDSIG" { print $3; exit }' "$verify_status")"
+          test "$signer" = "$expected_signer" || {
+            echo "Tag signer $signer does not match the pinned fingerprint." >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "$actual_commit" "origin/$DEFAULT_BRANCH"
+          version="${tag#v}"
+          name="$EXPECTED_NAME"
+          if [ -z "$name" ]; then name="Zapret Hub $version"; fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - name: Download release candidate
+        uses: actions/download-artifact@v6
+        with:
+          name: release-candidate
+          path: release-assets
+
+      - name: Require protected GPG signing secrets
+        env:
+          RELEASE_GPG_PRIVATE_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
+          RELEASE_GPG_PASSPHRASE: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          test -n "$RELEASE_GPG_PRIVATE_KEY" || { echo 'RELEASE_GPG_PRIVATE_KEY is not configured.' >&2; exit 1; }
+          test -n "$RELEASE_GPG_PASSPHRASE" || { echo 'RELEASE_GPG_PASSPHRASE is not configured.' >&2; exit 1; }
+
+      - name: Sign release checksum manifest
+        env:
+          RELEASE_GPG_PRIVATE_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
+          RELEASE_GPG_PASSPHRASE: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          expected='40015491B3A63D777855FEC08DA82B54BDED31AE'
+          printf '%s\n' "$RELEASE_GPG_PRIVATE_KEY" | gpg --batch --import
+          public_fingerprint="$(gpg --show-keys --with-colons release-signing-key.asc | awk -F: '$1 == "fpr" { print $10; exit }')"
+          secret_fingerprint="$(gpg --list-secret-keys --with-colons | awk -F: '$1 == "fpr" { print $10; exit }')"
+          test "$public_fingerprint" = "$expected" || { echo "Unexpected public key fingerprint: $public_fingerprint" >&2; exit 1; }
+          test "$secret_fingerprint" = "$expected" || { echo "GPG secret does not match the trusted public key: $secret_fingerprint" >&2; exit 1; }
+          cd release-assets
+          sha256sum *.exe *.zip | sort > SHA256SUMS.txt
+          printf '%s' "$RELEASE_GPG_PASSPHRASE" > "$RUNNER_TEMP/gpg-passphrase"
+          chmod 600 "$RUNNER_TEMP/gpg-passphrase"
+          gpg --batch --yes --armor --detach-sign --pinentry-mode loopback \
+            --passphrase-file "$RUNNER_TEMP/gpg-passphrase" \
+            --local-user "$expected" --output SHA256SUMS.txt.asc SHA256SUMS.txt
+          gpg --batch --verify SHA256SUMS.txt.asc SHA256SUMS.txt
+          cp ../release-signing-key.asc .
+          rm -f "$RUNNER_TEMP/gpg-passphrase"
+
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            release-assets/*.exe
+            release-assets/*.zip
+
+      - name: Prepare release notes
+        env:
+          RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release_meta.outputs.version }}
           INPUT_CHANGELOG: ${{ inputs.changelog }}
         run: |
-          $version = "${{ steps.release_meta.outputs.version }}"
-          $notesPath = ".\.github\release-notes\$version.md"
-          $changelog = $env:INPUT_CHANGELOG
-          if (Test-Path $notesPath) {
-            $body = Get-Content $notesPath -Raw -Encoding UTF8
-          } elseif (-not [string]::IsNullOrWhiteSpace($changelog)) {
-            $body = $changelog.Trim()
-          } else {
-            $body = @(
-              "## Assets",
-              "- ``install_zaprethub_${version}_universal.exe`` - slim installer",
-              "- ``zapret_hub_${version}_portable_win_x64.zip`` - portable build for Windows x64",
-              "- ``winget-manifests-${version}.zip`` - WinGet manifests"
-            ) -join "`n"
-          }
-          "body<<__ZAPRET_HUB_NOTES__" >> $env:GITHUB_OUTPUT
-          $body >> $env:GITHUB_OUTPUT
-          "__ZAPRET_HUB_NOTES__" >> $env:GITHUB_OUTPUT
-
-      - name: Remove legacy / sidecar release assets
-        # Best-effort: missing release / missing assets / gh not-found must not block publish.
-        continue-on-error: true
-        shell: pwsh
+          set -euo pipefail
+          notes_path=".github/release-notes/$RELEASE_VERSION.md"
+          if [ -f "$notes_path" ]; then
+            cp "$notes_path" RELEASE_NOTES.md
+          elif [ -n "$INPUT_CHANGELOG" ]; then
+            printf '%s\n' "$INPUT_CHANGELOG" > RELEASE_NOTES.md
+          else
+            printf '%s\n' "## Assets" "- Zapret Hub $RELEASE_VERSION installer and Portable x64 build" > RELEASE_NOTES.md
+          fi
+          printf '%s\n' \
+            '' \
+            '## Проверка подлинности и целостности' \
+            '' \
+            "- Релиз собран из подписанного GPG Git-тега $RELEASE_TAG." \
+            '- SHA256SUMS.txt подписан GPG; открытый ключ опубликован как release-signing-key.asc.' \
+            '- Fingerprint: 4001 5491 B3A6 3D77 7855 FEC0 8DA8 2B54 BDED 31AE.' \
+            '- Перед публикацией GitHub Actions скачивает релиз обратно и повторно проверяет подпись и SHA-256.' \
+            '- Повторная публикация существующего тега запрещена.' \
+            >> RELEASE_NOTES.md
+      - name: Refuse to modify an existing release
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
         run: |
-          $tag = "${{ steps.release_meta.outputs.tag }}"
-          $ErrorActionPreference = 'Continue'
-          $viewOut = gh release view $tag --json assets --jq '.assets[].name' 2>&1
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "No existing release for $tag (or view failed); skipping sidecar cleanup."
-            exit 0
-          }
-          $assets = @($viewOut | Where-Object { $_ -and ($_ -notmatch '^gh:') })
-          $version = "${{ steps.release_meta.outputs.version }}"
-          @(
-            "uninstall_zaprethub_${version}_win_x64.exe",
-            "uninstall_zaprethub_${version}_win_arm64.exe",
-            "README_RELEASE.txt",
-            "mirror-update-assets.example.json",
-            "zapret_hub_${version}_portable_win_x64.zip.sha256",
-            "zapret_hub_${version}_portable_win_x64.zip.build_info.json",
-            "zapret_hub_${version}_portable_win_x64.asset.json",
-            "zapret_hub_${version}_portable_win_arm64.zip.sha256",
-            "zapret_hub_${version}_portable_win_arm64.zip.build_info.json",
-            "zapret_hub_${version}_portable_win_arm64.asset.json"
-          ) | ForEach-Object {
-            if ($assets -contains $_) {
-              gh release delete-asset $tag $_ --yes 2>&1 | Out-Host
-              if ($LASTEXITCODE -ne 0) {
-                Write-Warning "Could not remove legacy asset $_ (continuing)."
-              }
-            }
-          }
-          exit 0
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; refusing to modify an immutable release." >&2
+            exit 1
+          fi
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.release_meta.outputs.tag }}
-          name: ${{ steps.release_meta.outputs.name }}
-          body: ${{ steps.release_notes.outputs.body }}
-          files: |
-            release_${{ steps.release_meta.outputs.version }}/install_zaprethub_${{ steps.release_meta.outputs.version }}_universal.exe
-            release_${{ steps.release_meta.outputs.version }}/zapret_hub_${{ steps.release_meta.outputs.version }}_portable_win_x64.zip
-            release_${{ steps.release_meta.outputs.version }}/winget-manifests-${{ steps.release_meta.outputs.version }}.zip
+      - name: Create draft release with signed assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
+          RELEASE_NAME: ${{ steps.release_meta.outputs.name }}
+        run: |
+          set -euo pipefail
+          echo "RELEASE_DRAFT_CREATED=false" >> "$GITHUB_ENV"
+          mapfile -t release_assets < <(
+            find release-assets -maxdepth 1 -type f \
+              \( -name '*.exe' -o -name '*.zip' -o -name 'SHA256SUMS.txt' -o -name 'SHA256SUMS.txt.asc' -o -name 'release-signing-key.asc' \) \
+              -print | sort
+          )
+          if (( ${#release_assets[@]} != 6 )); then
+            echo "Expected exactly 6 release files, found ${#release_assets[@]}." >&2
+            printf '%s\n' "${release_assets[@]}" >&2
+            exit 1
+          fi
+          printf 'Uploading release asset: %s\n' "${release_assets[@]}"
+          gh release create "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$RELEASE_NAME" \
+            --notes-file RELEASE_NOTES.md \
+            --draft --verify-tag
+          echo "RELEASE_DRAFT_CREATED=true" >> "$GITHUB_ENV"
+          gh release upload "$RELEASE_TAG" "${release_assets[@]}" \
+            --repo "$GITHUB_REPOSITORY"
+      - name: Redownload and verify published bytes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir redownload
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir redownload
+          cd redownload
+          gpg --batch --import release-signing-key.asc
+          gpg --batch --verify SHA256SUMS.txt.asc SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+
+      - name: Publish verified immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
+        run: gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+      - name: Remove failed draft release
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
+        run: |
+          if [[ "${RELEASE_DRAFT_CREATED:-false}" != "true" ]]; then
+            echo "No draft release was created by this workflow run; skipping cleanup."
+            exit 0
+          fi
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null | grep -qx true; then
+            gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag=false
+          fi

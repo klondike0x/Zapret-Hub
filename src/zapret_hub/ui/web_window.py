@@ -3989,7 +3989,7 @@ class WebMainWindow(QMainWindow):
 
         payload = {
             "currentVersion": str(__version__),
-            "latestVersion": "3.0.3",
+            "latestVersion": "3.0.4",
             "changelog": (
                 "• Улучшения интерфейса быстрого доступа\n"
                 "• Исправления стабильности переключения страниц\n"

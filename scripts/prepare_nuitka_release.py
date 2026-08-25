@@ -8,7 +8,7 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-VERSION = "3.0.3"
+VERSION = "3.0.4"
 
 
 def _load_prune():
