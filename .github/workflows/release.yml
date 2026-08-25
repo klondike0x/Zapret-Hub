@@ -59,8 +59,35 @@ jobs:
           git fetch --force origin "refs/tags/$tag:refs/tags/$tag"
           git cat-file -e "$tag^{tag}" || { echo "Release tag must be an annotated tag: $tag" >&2; exit 1; }
           commit="$(git rev-parse "$tag^{commit}")"
-          git show "${tag}:release-signing-key.asc" | gpg --batch --import
-          git verify-tag "$tag"
+          expected_signer='40015491B3A63D777855FEC08DA82B54BDED31AE'
+          gpg_home="$(mktemp -d)"
+          chmod 700 "$gpg_home"
+          export GNUPGHOME="$gpg_home"
+          trap 'rm -rf "$gpg_home"' EXIT
+          key_file="$gpg_home/release-signing-key.asc"
+          verify_status="$gpg_home/verify.status"
+          git show "${tag}:release-signing-key.asc" > "$key_file"
+          primary_count="$(gpg --batch --with-colons --import-options show-only --import "$key_file" | awk -F: '$1 == "pub" { count++ } END { print count + 0 }')"
+          test "$primary_count" = "1" || {
+            echo "Release signing key must contain exactly one primary key; found $primary_count." >&2
+            exit 1
+          }
+          primary_fingerprint="$(gpg --batch --with-colons --import-options show-only --import "$key_file" | awk -F: '$1 == "pub" { in_primary=1; next } in_primary && $1 == "fpr" { print $10; exit }')"
+          test "$primary_fingerprint" = "$expected_signer" || {
+            echo "Release signing key fingerprint $primary_fingerprint does not match the pinned fingerprint." >&2
+            exit 1
+          }
+          gpg --batch --import "$key_file"
+          if ! git verify-tag --raw "$tag" > "$verify_status" 2>&1; then
+            cat "$verify_status" >&2
+            exit 1
+          fi
+          cat "$verify_status"
+          signer="$(awk '$1 == "[GNUPG:]" && $2 == "VALIDSIG" { print $3; exit }' "$verify_status")"
+          test "$signer" = "$expected_signer" || {
+            echo "Tag signer $signer does not match the pinned fingerprint." >&2
+            exit 1
+          }
           git merge-base --is-ancestor "$commit" "origin/$DEFAULT_BRANCH"
           version="${tag#v}"
           name="$INPUT_RELEASE_NAME"
@@ -523,8 +550,35 @@ jobs:
             echo "Publish job checked out a different commit than the resolved release commit." >&2
             exit 1
           }
-          git show "${tag}:release-signing-key.asc" | gpg --batch --import
-          git verify-tag "$tag"
+          expected_signer='40015491B3A63D777855FEC08DA82B54BDED31AE'
+          gpg_home="$(mktemp -d)"
+          chmod 700 "$gpg_home"
+          export GNUPGHOME="$gpg_home"
+          trap 'rm -rf "$gpg_home"' EXIT
+          key_file="$gpg_home/release-signing-key.asc"
+          verify_status="$gpg_home/verify.status"
+          git show "${tag}:release-signing-key.asc" > "$key_file"
+          primary_count="$(gpg --batch --with-colons --import-options show-only --import "$key_file" | awk -F: '$1 == "pub" { count++ } END { print count + 0 }')"
+          test "$primary_count" = "1" || {
+            echo "Release signing key must contain exactly one primary key; found $primary_count." >&2
+            exit 1
+          }
+          primary_fingerprint="$(gpg --batch --with-colons --import-options show-only --import "$key_file" | awk -F: '$1 == "pub" { in_primary=1; next } in_primary && $1 == "fpr" { print $10; exit }')"
+          test "$primary_fingerprint" = "$expected_signer" || {
+            echo "Release signing key fingerprint $primary_fingerprint does not match the pinned fingerprint." >&2
+            exit 1
+          }
+          gpg --batch --import "$key_file"
+          if ! git verify-tag --raw "$tag" > "$verify_status" 2>&1; then
+            cat "$verify_status" >&2
+            exit 1
+          fi
+          cat "$verify_status"
+          signer="$(awk '$1 == "[GNUPG:]" && $2 == "VALIDSIG" { print $3; exit }' "$verify_status")"
+          test "$signer" = "$expected_signer" || {
+            echo "Tag signer $signer does not match the pinned fingerprint." >&2
+            exit 1
+          }
           git merge-base --is-ancestor "$actual_commit" "origin/$DEFAULT_BRANCH"
           version="${tag#v}"
           name="$EXPECTED_NAME"
