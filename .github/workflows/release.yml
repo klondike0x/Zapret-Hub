@@ -592,14 +592,13 @@ jobs:
           name: release-candidate
           path: release-assets
 
-      - name: Require protected GPG signing secrets
+      - name: Require GPG signing key
         env:
           RELEASE_GPG_PRIVATE_KEY: ${{ secrets.RELEASE_GPG_PRIVATE_KEY }}
           RELEASE_GPG_PASSPHRASE: ${{ secrets.RELEASE_GPG_PASSPHRASE }}
         run: |
           set -euo pipefail
           test -n "$RELEASE_GPG_PRIVATE_KEY" || { echo 'RELEASE_GPG_PRIVATE_KEY is not configured.' >&2; exit 1; }
-          test -n "$RELEASE_GPG_PASSPHRASE" || { echo 'RELEASE_GPG_PASSPHRASE is not configured.' >&2; exit 1; }
 
       - name: Sign release checksum manifest
         env:
@@ -615,14 +614,19 @@ jobs:
           test "$secret_fingerprint" = "$expected" || { echo "GPG secret does not match the trusted public key: $secret_fingerprint" >&2; exit 1; }
           cd release-assets
           sha256sum *.exe *.zip | sort > SHA256SUMS.txt
-          printf '%s' "$RELEASE_GPG_PASSPHRASE" > "$RUNNER_TEMP/gpg-passphrase"
-          chmod 600 "$RUNNER_TEMP/gpg-passphrase"
-          gpg --batch --yes --armor --detach-sign --pinentry-mode loopback \
-            --passphrase-file "$RUNNER_TEMP/gpg-passphrase" \
-            --local-user "$expected" --output SHA256SUMS.txt.asc SHA256SUMS.txt
+          if [ -n "$RELEASE_GPG_PASSPHRASE" ]; then
+            printf '%s' "$RELEASE_GPG_PASSPHRASE" > "$RUNNER_TEMP/gpg-passphrase"
+            chmod 600 "$RUNNER_TEMP/gpg-passphrase"
+            gpg --batch --yes --armor --detach-sign --pinentry-mode loopback \
+              --passphrase-file "$RUNNER_TEMP/gpg-passphrase" \
+              --local-user "$expected" --output SHA256SUMS.txt.asc SHA256SUMS.txt
+            rm -f "$RUNNER_TEMP/gpg-passphrase"
+          else
+            gpg --batch --yes --armor --detach-sign \
+              --local-user "$expected" --output SHA256SUMS.txt.asc SHA256SUMS.txt
+          fi
           gpg --batch --verify SHA256SUMS.txt.asc SHA256SUMS.txt
           cp ../release-signing-key.asc .
-          rm -f "$RUNNER_TEMP/gpg-passphrase"
 
       - name: Attest release artifacts
         uses: actions/attest-build-provenance@v4
