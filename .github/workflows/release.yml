@@ -519,13 +519,14 @@ jobs:
             exit 1
           fi
           printf 'Uploading release asset: %s\n' "${release_assets[@]}"
-          gh release create "$RELEASE_TAG" "${release_assets[@]}" \
+          gh release create "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$RELEASE_NAME" \
             --notes-file RELEASE_NOTES.md \
             --draft --verify-tag
           echo "RELEASE_DRAFT_CREATED=true" >> "$GITHUB_ENV"
-
+          gh release upload "$RELEASE_TAG" "${release_assets[@]}" \
+            --repo "$GITHUB_REPOSITORY"
       - name: Redownload and verify published bytes
         env:
           GH_TOKEN: ${{ github.token }}
