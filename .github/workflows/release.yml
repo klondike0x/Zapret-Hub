@@ -500,11 +500,24 @@ jobs:
           RELEASE_NAME: ${{ steps.release_meta.outputs.name }}
         run: |
           set -euo pipefail
-          gh release create "$RELEASE_TAG" release-assets/* \
+          echo "RELEASE_DRAFT_CREATED=false" >> "$GITHUB_ENV"
+          mapfile -t release_assets < <(
+            find release-assets -maxdepth 1 -type f \
+              \( -name '*.exe' -o -name '*.zip' -o -name 'SHA256SUMS.txt' -o -name 'SHA256SUMS.txt.asc' -o -name 'release-signing-key.asc' \) \
+              -print | sort
+          )
+          if (( ${#release_assets[@]} != 6 )); then
+            echo "Expected exactly 6 release files, found ${#release_assets[@]}." >&2
+            printf '%s\n' "${release_assets[@]}" >&2
+            exit 1
+          fi
+          printf 'Uploading release asset: %s\n' "${release_assets[@]}"
+          gh release create "$RELEASE_TAG" "${release_assets[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --title "$RELEASE_NAME" \
             --notes-file RELEASE_NOTES.md \
             --draft --verify-tag
+          echo "RELEASE_DRAFT_CREATED=true" >> "$GITHUB_ENV"
 
       - name: Redownload and verify published bytes
         env:
@@ -530,6 +543,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
         run: |
+          if [[ "${RELEASE_DRAFT_CREATED:-false}" != "true" ]]; then
+            echo "No draft release was created by this workflow run; skipping cleanup."
+            exit 0
+          fi
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null | grep -qx true; then
             gh release delete "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag=false
           fi
