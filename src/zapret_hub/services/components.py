@@ -2931,25 +2931,46 @@ Get-NetAdapter -ErrorAction SilentlyContinue | ForEach-Object {
         """Guarantee Discord/voice fake bins exist in the active runtime bin/."""
         base_bin = self.storage.paths.runtime_dir / "zapret-discord-youtube" / "bin"
         target = Path(active_root) / "bin"
-        if not base_bin.is_dir():
-            return
         target.mkdir(parents=True, exist_ok=True)
+        service_bin = self.storage.paths.install_root / "sample_data" / "default_services" / "gaming" / "bin"
+        source_dirs = tuple(path for path in (base_bin, service_bin) if path.is_dir())
+        if not source_dirs:
+            return
         for name in (
             "ACTIVE_DISCORD_UDP.bin",
             "ACTIVE_GAME_UDP.bin",
             "quic_initial_www_google_com.bin",
+            "quic_initial_dbankcloud_ru.bin",
             "tls_clienthello_www_google_com.bin",
             "tls_clienthello_4pda_to.bin",
             "stun.bin",
         ):
             dest = target / name
-            src = base_bin / name
-            if dest.is_file() or not src.is_file():
+            if dest.is_file():
                 continue
-            try:
-                shutil.copy2(src, dest)
-            except OSError:
-                pass
+            for source_dir in source_dirs:
+                src = source_dir / name
+                if not src.is_file():
+                    continue
+                try:
+                    shutil.copy2(src, dest)
+                except OSError:
+                    pass
+                break
+
+            # Older/newly downloaded Zapret runtimes may not ship the gaming
+            # payload. Keep the command line valid by reusing the standard QUIC
+            # payload instead of letting winws.exe fail on a missing file.
+            if name == "quic_initial_dbankcloud_ru.bin" and not dest.is_file():
+                for source_dir in source_dirs:
+                    fallback = source_dir / "quic_initial_www_google_com.bin"
+                    if not fallback.is_file():
+                        continue
+                    try:
+                        shutil.copy2(fallback, dest)
+                    except OSError:
+                        pass
+                    break
 
     def _bundle_has_bin_overlay(self, bundle_root: Path) -> bool:
         bin_dir = bundle_root / "bin"
